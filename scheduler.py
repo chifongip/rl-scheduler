@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
+import shlex
 import shutil
 import signal
 import time
@@ -15,6 +17,7 @@ from models import (
     get_task_by_id,
     get_tasks,
     row_to_status,
+    set_task_aborted,
     set_task_finished,
     set_task_running,
     TaskStatus,
@@ -26,10 +29,26 @@ POLL_INTERVAL_SECONDS = 3.0
 LOGS_DIR = "logs"
 
 
-def _wrap_command(command: str, conda_env: str | None) -> str:
-    if conda_env is None:
-        return command
-    return f"conda run -n {conda_env} --no-capture-output --live-stream {command}"
+def _find_conda_python(username: str, conda_env: str) -> str | None:
+    for conda_dir in ("miniconda3", "anaconda3", "miniforge3"):
+        python_path = f"/home/{username}/{conda_dir}/envs/{conda_env}/bin/python"
+        if os.path.isfile(python_path):
+            return python_path
+    return None
+
+
+def _wrap_command(command: str, conda_env: str | None, username: str | None = None, gpu_id: int | None = None, work_dir: str | None = None) -> str:
+    if conda_env is not None and username is not None:
+        python_path = _find_conda_python(username, conda_env)
+        if python_path:
+            command = re.sub(r'\bpython3?\b', shlex.quote(python_path), command)
+    if gpu_id is not None:
+        command = f"export CUDA_VISIBLE_DEVICES={gpu_id} && {command}"
+    if work_dir:
+        command = f"cd {shlex.quote(work_dir)} && {command}"
+    if username is not None:
+        return f"sudo -u {shlex.quote(username)} bash -l -c {shlex.quote(command)}"
+    return command
 
 
 class Scheduler:
@@ -76,22 +95,32 @@ class Scheduler:
 
     async def _dispatch_pending_tasks(self) -> None:
         pending = await get_pending_tasks(self.db)
+        if not pending:
+            return
         for row in pending:
             preferred = row["preferred_gpu_id"]
             if preferred is not None:
                 # User pinned a specific GPU — only use it if available
                 if not self.gpu_manager.is_gpu_available(preferred):
+                    logger.info(
+                        "Task %s waiting: preferred GPU %d not available", row["id"], preferred,
+                    )
                     continue
                 gpu_id = preferred
             else:
                 gpu_id = self.gpu_manager.find_available_gpu()
                 if gpu_id is None:
+                    logger.info(
+                        "Task %s waiting: no GPU available (checked %s)",
+                        row["id"], self.gpu_manager.managed_gpu_ids,
+                    )
                     break
             task_id = row["id"]
             command = row["command"]
             work_dir = row["work_dir"]
             conda_env = row["conda_env"]
-            await self._spawn_task(task_id, command, work_dir, gpu_id, conda_env)
+            username = row["username"]
+            await self._spawn_task(task_id, command, work_dir, gpu_id, conda_env, username)
 
     async def _spawn_task(
         self,
@@ -100,27 +129,36 @@ class Scheduler:
         work_dir: str,
         gpu_id: int,
         conda_env: str | None = None,
+        username: str | None = None,
     ) -> None:
         env = os.environ.copy()
-        env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
 
-        wrapped = _wrap_command(command, conda_env)
+        wrapped = _wrap_command(command, conda_env, username, gpu_id, work_dir)
         timestamp = int(time.time())
         log_path = os.path.join(LOGS_DIR, f"{task_id}_{timestamp}.log")
         log_fh = open(log_path, "w")
-
-        process = await asyncio.create_subprocess_shell(
-            wrapped,
-            cwd=work_dir,
-            env=env,
-            stdout=log_fh,
-            stderr=asyncio.subprocess.STDOUT,
-            preexec_fn=os.setsid,
-        )
+        try:
+            process = await asyncio.create_subprocess_shell(
+                wrapped,
+                env=env,
+                stdout=log_fh,
+                stderr=asyncio.subprocess.STDOUT,
+                preexec_fn=os.setsid,
+            )
+        except Exception:
+            log_fh.close()
+            logger.exception("Failed to spawn task %s", task_id)
+            await set_task_aborted(self.db, task_id)
+            return
 
         self._processes[task_id] = (process, log_fh)
         self.gpu_manager.register_task(task_id, gpu_id)
-        await set_task_running(self.db, task_id, gpu_id, process.pid, log_path)
+        updated = await set_task_running(self.db, task_id, gpu_id, process.pid, log_path)
+        if not updated:
+            # Task was aborted or already dispatched in another codepath
+            await self._kill_process(task_id)
+            logger.info("Task %s was aborted before dispatch completed — cleaned up", task_id)
+            return
         logger.info(
             "Task %s dispatched → GPU %d (pid=%d, conda=%s, log=%s)",
             task_id, gpu_id, process.pid, conda_env or "none", log_path,
@@ -133,10 +171,14 @@ class Scheduler:
                 await self._finalize_task(task_id, process.returncode)
 
     async def _finalize_task(self, task_id: str, exit_code: int) -> None:
-        process, log_fh = self._processes.pop(task_id)
-        log_fh.close()
+        updated = await set_task_finished(self.db, task_id, exit_code)
+        if not updated:
+            logger.info("Task %s was already finalized (likely aborted)", task_id)
+            return
+        process, log_fh = self._processes.pop(task_id, (None, None))
+        if process is not None:
+            log_fh.close()
         self.gpu_manager.unregister_task(task_id)
-        await set_task_finished(self.db, task_id, exit_code)
         status = "COMPLETED" if exit_code == 0 else "FAILED"
         logger.info("Task %s %s (exit_code=%d)", task_id, status, exit_code)
 
@@ -154,18 +196,18 @@ class Scheduler:
         self.gpu_manager.unregister_task(task_id)
 
     async def submit_task(
-        self, command: str, work_dir: str, priority: int = 0,
+        self, username: str, command: str, work_dir: str, priority: int = 0,
         conda_env: str | None = None, preferred_gpu_id: int | None = None,
     ) -> str:
         from models import insert_task, TaskSubmit
         submit = TaskSubmit(
-            command=command, work_dir=work_dir, priority=priority,
+            username=username, command=command, work_dir=work_dir, priority=priority,
             conda_env=conda_env, preferred_gpu_id=preferred_gpu_id,
         )
         task_id = await insert_task(self.db, submit)
         logger.info(
-            "Task submitted: %s (cmd=%r, conda=%s, gpu=%s, priority=%d)",
-            task_id, command, conda_env, preferred_gpu_id, priority,
+            "Task submitted: %s (user=%s, cmd=%r, conda=%s, gpu=%s, priority=%d)",
+            task_id, username, command, conda_env, preferred_gpu_id, priority,
         )
         return task_id
 
@@ -173,13 +215,16 @@ class Scheduler:
         row = await get_task_by_id(self.db, task_id)
         if row is None:
             return False
-        if row["state"] != "RUNNING":
+        if row["state"] == "RUNNING":
+            await self._kill_process(task_id)
+        elif row["state"] == "PENDING":
+            pass  # No process to kill, just update state
+        else:
             return False
-        await self._kill_process(task_id)
-        await set_task_finished(self.db, task_id, -9)
-        logger.info("Task %s aborted", task_id)
+        await set_task_aborted(self.db, task_id)
+        logger.info("Task %s aborted (was %s)", task_id, row["state"])
         return True
 
-    async def get_tasks(self, state: str | None = None) -> list[TaskStatus]:
-        rows = await get_tasks(self.db, state)
+    async def get_tasks(self, state: str | None = None, username: str | None = None) -> list[TaskStatus]:
+        rows = await get_tasks(self.db, state, username)
         return [row_to_status(r) for r in rows]

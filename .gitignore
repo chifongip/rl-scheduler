@@ -5,3 +5,4 @@ logs/
 notes/
 scheduler.db
 .env
+.vscode/

@@ -8,15 +8,9 @@ from models import GpuStatus
 
 logger = logging.getLogger("hardware")
 
-DEFAULT_MEMORY_THRESHOLD_MB = 500
-
 
 class GpuManager:
-    def __init__(
-        self,
-        managed_gpu_ids: list[int] | None = None,
-        memory_threshold_mb: int = DEFAULT_MEMORY_THRESHOLD_MB,
-    ):
+    def __init__(self, managed_gpu_ids: list[int] | None = None):
         pynvml.nvmlInit()
         device_count = pynvml.nvmlDeviceGetCount()
         if managed_gpu_ids is None:
@@ -25,14 +19,9 @@ class GpuManager:
             if gid >= device_count:
                 raise ValueError(f"GPU {gid} not found (system has {device_count} GPUs)")
         self.managed_gpu_ids = managed_gpu_ids
-        self.memory_threshold_mb = memory_threshold_mb
         # task_id -> gpu_id mapping for active jobs
         self.active_tasks: dict[str, int] = {}
-        logger.info(
-            "GpuManager initialized: managing GPUs %s, threshold %d MB",
-            self.managed_gpu_ids,
-            self.memory_threshold_mb,
-        )
+        logger.info("GpuManager initialized: managing GPUs %s", self.managed_gpu_ids)
 
     def get_gpu_status(self, gpu_id: int) -> GpuStatus:
         handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_id)
@@ -41,9 +30,18 @@ class GpuManager:
             name = name.decode()
         temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
         mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-        mem_used_mb = mem_info.used // (1024 * 1024)
         mem_total_mb = mem_info.total // (1024 * 1024)
-        mem_pct = round(mem_info.used / mem_info.total * 100, 1) if mem_info.total > 0 else 0.0
+
+        # Sum per-process memory to match nvidia-smi's "Used" (excludes driver overhead)
+        try:
+            compute_procs = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
+            graphics_procs = pynvml.nvmlDeviceGetGraphicsRunningProcesses(handle)
+            proc_mem = sum(p.usedGpuMemory or 0 for p in compute_procs + graphics_procs)
+        except pynvml.NVMLError:
+            proc_mem = mem_info.used  # fallback to v1 if process query fails
+
+        mem_used_mb = proc_mem // (1024 * 1024)
+        mem_pct = round(proc_mem / mem_info.total * 100, 1) if mem_info.total > 0 else 0.0
         active_task_id = None
         for tid, gid in self.active_tasks.items():
             if gid == gpu_id:
@@ -72,12 +70,29 @@ class GpuManager:
         if gpu_id not in self.managed_gpu_ids:
             return False
         if gpu_id in self.active_tasks.values():
+            logger.debug("GPU %d unavailable: has scheduler-managed task", gpu_id)
             return False
         try:
             handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_id)
-            mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-            mem_used_mb = mem_info.used // (1024 * 1024)
-            return mem_used_mb < self.memory_threshold_mb
+            compute_procs = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
+            # Filter out MPS server (system daemon, not a training job)
+            non_mps = []
+            for p in compute_procs:
+                try:
+                    name = pynvml.nvmlSystemGetProcessName(p.pid)
+                    if isinstance(name, bytes):
+                        name = name.decode()
+                    if "mps" not in name.lower():
+                        non_mps.append(p)
+                except pynvml.NVMLError:
+                    non_mps.append(p)  # can't identify, assume it's real
+            if non_mps:
+                logger.info(
+                    "GPU %d unavailable: %d compute process(es) running",
+                    gpu_id, len(non_mps),
+                )
+                return False
+            return True
         except pynvml.NVMLError as e:
             logger.warning("NVML error checking GPU %d: %s", gpu_id, e)
             return False

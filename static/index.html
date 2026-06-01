@@ -29,6 +29,9 @@
         </div>
     </div>
     <div class="flex items-center gap-3 text-sm">
+        <select id="user-selector" class="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500">
+            <option value="">Select user...</option>
+        </select>
         <span id="stat-gpus" class="bg-gray-800 px-2.5 py-1 rounded">-- GPUs</span>
         <span id="stat-running" class="bg-gray-800 px-2.5 py-1 rounded">-- Running</span>
         <span id="stat-pending" class="bg-gray-800 px-2.5 py-1 rounded">-- Pending</span>
@@ -61,10 +64,13 @@
                 </div>
                 <div>
                     <label class="block text-xs text-gray-400 mb-1">Working Directory</label>
-                    <select id="f-workdir"
-                        class="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm font-mono focus:outline-none focus:border-blue-500">
-                        <option value=".">.</option>
-                    </select>
+                    <div class="flex gap-1">
+                        <select id="f-workdir"
+                            class="flex-1 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm font-mono focus:outline-none focus:border-blue-500">
+                            <option value=".">.</option>
+                        </select>
+                        <button type="button" onclick="openBrowseModal()" class="bg-gray-700 hover:bg-gray-600 text-gray-300 px-3 py-2 rounded text-sm transition">Browse...</button>
+                    </div>
                     <input id="f-workdir-custom" type="text" placeholder="/path/to/project"
                         class="hidden w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm font-mono focus:outline-none focus:border-blue-500 mt-1">
                 </div>
@@ -113,6 +119,7 @@
                 <thead>
                     <tr class="text-xs text-gray-500 uppercase border-b border-gray-800">
                         <th class="px-4 py-2.5 text-left">ID</th>
+                        <th class="px-4 py-2.5 text-left">User</th>
                         <th class="px-4 py-2.5 text-left">Command</th>
                         <th class="px-4 py-2.5 text-left">GPU</th>
                         <th class="px-4 py-2.5 text-center">Priority</th>
@@ -122,7 +129,7 @@
                     </tr>
                 </thead>
                 <tbody id="task-tbody">
-                    <tr><td colspan="7" class="px-4 py-8 text-center text-gray-500">Loading...</td></tr>
+                    <tr><td colspan="8" class="px-4 py-8 text-center text-gray-500">Loading...</td></tr>
                 </tbody>
             </table>
         </div>
@@ -143,10 +150,34 @@
     </div>
 </div>
 
+<!-- Browse Modal -->
+<div id="browse-modal" class="fixed inset-0 z-40 hidden flex items-center justify-center modal-bg" onclick="if(event.target===this)closeBrowseModal()">
+    <div class="bg-gray-900 rounded-lg border border-gray-700 w-full max-w-lg max-h-[80vh] flex flex-col mx-4">
+        <div class="flex items-center justify-between px-5 py-3 border-b border-gray-800">
+            <h3 class="font-semibold text-sm">Select Working Directory</h3>
+            <button onclick="closeBrowseModal()" class="text-gray-500 hover:text-gray-300 text-xl">&times;</button>
+        </div>
+        <div id="browse-breadcrumb" class="px-5 py-2 text-xs text-gray-400 border-b border-gray-800 flex items-center gap-1 overflow-x-auto"></div>
+        <div id="browse-list" class="flex-1 overflow-auto px-2 py-2"></div>
+        <div class="flex items-center justify-between px-5 py-3 border-t border-gray-800">
+            <span id="browse-selected" class="text-xs text-gray-400 font-mono truncate flex-1 mr-3"></span>
+            <div class="flex gap-2">
+                <button onclick="closeBrowseModal()" class="bg-gray-700 hover:bg-gray-600 text-gray-300 px-3 py-1.5 rounded text-xs transition">Cancel</button>
+                <button onclick="confirmBrowseSelection()" class="bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 rounded text-xs transition">Select</button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script>
 const API = '';
 let currentFilter = null;
 let pollingInterval = null;
+let currentUser = localStorage.getItem('rl-scheduler-user') || '';
+
+function getSelectedUser() {
+    return document.getElementById('user-selector').value || currentUser;
+}
 
 // --- Toast notifications ---
 function showToast(message, type = 'info') {
@@ -202,9 +233,9 @@ function tempColor(t) { return t < 60 ? 'text-green-400' : t < 80 ? 'text-yellow
 function memColor(pct) { return pct < 50 ? 'bg-green-500' : pct < 80 ? 'bg-yellow-500' : 'bg-red-500'; }
 
 async function refreshGpus() {
+    const container = document.getElementById('gpu-cards');
     try {
         const { gpus } = await apiFetch('/gpus');
-        const container = document.getElementById('gpu-cards');
         if (!gpus.length) { container.innerHTML = '<div class="text-gray-500 text-sm">No GPUs managed</div>'; return; }
         container.innerHTML = gpus.map(g => `
             <div class="bg-gray-900 rounded-lg p-4 border border-gray-800">
@@ -230,20 +261,52 @@ async function refreshGpus() {
                 ${g.active_task_id ? `<div class="text-xs text-gray-500 mt-1 truncate">Task: <span class="text-gray-400 font-mono">${g.active_task_id}</span></div>` : ''}
             </div>
         `).join('');
-    } catch (e) { console.error('GPU refresh failed:', e); }
+    } catch (e) {
+        console.error('GPU refresh failed:', e);
+        container.innerHTML = '<div class="text-red-400 col-span-full text-center py-4">Failed to fetch GPU status. Retrying...</div>';
+    }
+}
+
+// --- Users ---
+async function loadUsers() {
+    try {
+        const { users } = await apiFetch('/users');
+        const sel = document.getElementById('user-selector');
+        sel.innerHTML = '<option value="">Select user...</option>' +
+            users.map(u => `<option value="${u}" ${u === currentUser ? 'selected' : ''}>${u}</option>`).join('');
+        if (currentUser && users.includes(currentUser)) {
+            onUserChange(currentUser);
+        }
+    } catch {
+        // leave default
+    }
+}
+
+document.getElementById('user-selector').addEventListener('change', function() {
+    currentUser = this.value;
+    localStorage.setItem('rl-scheduler-user', currentUser);
+    onUserChange(currentUser);
+});
+
+function onUserChange(username) {
+    if (username) {
+        loadWorkdirs(username);
+        loadCondaEnvs(username);
+    }
 }
 
 // --- Workdirs ---
-async function loadWorkdirs() {
+async function loadWorkdirs(username) {
+    if (!username) return;
     try {
-        const { directories } = await apiFetch('/workdirs');
+        const { directories } = await apiFetch('/workdirs/' + encodeURIComponent(username));
         const sel = document.getElementById('f-workdir');
         const opts = ['<option value=".">.</option>'] +
             directories.map(d => `<option value="${d}">${d}</option>`).join('') +
             '<option value="__custom__">Custom...</option>';
         sel.innerHTML = opts;
-    } catch {
-        // leave default "." option
+    } catch (e) {
+        showToast('Failed to load workdirs: ' + e.message, 'error');
     }
 }
 
@@ -270,13 +333,14 @@ async function loadGpus() {
 }
 
 // --- Conda envs ---
-async function loadCondaEnvs() {
+async function loadCondaEnvs(username) {
+    if (!username) return;
     try {
-        const { environments } = await apiFetch('/conda/envs');
+        const { environments } = await apiFetch('/conda/envs/' + encodeURIComponent(username));
         const sel = document.getElementById('f-conda');
         sel.innerHTML = '<option value="">None</option>' + environments.map(e => `<option value="${e}">${e}</option>`).join('');
-    } catch {
-        // conda not available, leave as "None" only
+    } catch (e) {
+        showToast('Failed to load conda envs: ' + e.message, 'error');
     }
 }
 
@@ -304,20 +368,22 @@ async function refreshTasks() {
         const { tasks } = await apiFetch('/tasks/status' + qs);
         const tbody = document.getElementById('task-tbody');
         if (!tasks.length) {
-            tbody.innerHTML = `<tr><td colspan="7" class="px-4 py-8 text-center text-gray-500">No tasks${currentFilter ? ' with state ' + currentFilter : ''}</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="8" class="px-4 py-8 text-center text-gray-500">No tasks${currentFilter ? ' with state ' + currentFilter : ''}</td></tr>`;
             return;
         }
         tbody.innerHTML = tasks.map(t => `
             <tr class="border-b border-gray-800 hover:bg-gray-800/50 transition">
                 <td class="px-4 py-2.5 font-mono text-xs text-gray-400">${t.id}</td>
+                <td class="px-4 py-2.5 text-xs text-gray-300">${t.username || '--'}</td>
                 <td class="px-4 py-2.5 font-mono text-xs max-w-xs truncate" title="${escapeHtml(t.command)}">${escapeHtml(t.command)}</td>
                 <td class="px-4 py-2.5 text-xs">${t.gpu_id != null ? 'GPU ' + t.gpu_id : '--'}</td>
                 <td class="px-4 py-2.5 text-center text-xs">${t.priority}</td>
                 <td class="px-4 py-2.5 text-center">${stateBadge(t.state)}</td>
                 <td class="px-4 py-2.5 text-right text-xs text-gray-400">${formatDuration(t.duration)}</td>
                 <td class="px-4 py-2.5 text-right">
-                    ${t.state === 'RUNNING' ? `<button onclick="abortTask('${t.id}')" class="bg-red-600/80 hover:bg-red-500 text-white px-2.5 py-1 rounded text-xs transition">Abort</button>` : ''}
-                    ${t.state === 'COMPLETED' || t.state === 'FAILED' ? `<button onclick="viewLog('${t.id}', '${escapeHtml(t.command)}', ${t.exit_code}, ${t.duration})" class="bg-gray-700 hover:bg-gray-600 text-gray-300 px-2.5 py-1 rounded text-xs transition">Log</button>` : ''}
+                    ${t.state === 'RUNNING' ? `<button onclick="viewLog('${t.id}', '${escapeAttr(t.command)}', null, null)" class="bg-gray-700 hover:bg-gray-600 text-gray-300 px-2.5 py-1 rounded text-xs transition mr-1">Log</button>` : ''}
+                    ${t.state === 'RUNNING' || t.state === 'PENDING' ? `<button onclick="abortTask('${t.id}')" class="bg-red-600/80 hover:bg-red-500 text-white px-2.5 py-1 rounded text-xs transition">Abort</button>` : ''}
+                    ${t.state === 'COMPLETED' || t.state === 'FAILED' ? `<button onclick="viewLog('${t.id}', '${escapeAttr(t.command)}', ${t.exit_code}, ${t.duration})" class="bg-gray-700 hover:bg-gray-600 text-gray-300 px-2.5 py-1 rounded text-xs transition">Log</button>` : ''}
                 </td>
             </tr>
         `).join('');
@@ -325,7 +391,11 @@ async function refreshTasks() {
 }
 
 function escapeHtml(s) {
-    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+function escapeAttr(s) {
+    return escapeHtml(s.replace(/\\/g, '\\\\').replace(/'/g, "\\'"));
 }
 
 // --- Filter tabs ---
@@ -343,11 +413,17 @@ function setFilter(state) {
 // --- Submit ---
 async function handleSubmit(e) {
     e.preventDefault();
+    const user = getSelectedUser();
+    if (!user) {
+        showToast('Please select a user first', 'error');
+        return;
+    }
     const workdirSel = document.getElementById('f-workdir').value;
     const workdirCustom = document.getElementById('f-workdir-custom').value.trim();
     const workDir = workdirSel === '__custom__' ? (workdirCustom || '.') : workdirSel;
     const gpuVal = document.getElementById('f-gpu').value;
     const body = {
+        username: user,
         command: document.getElementById('f-command').value.trim(),
         work_dir: workDir,
         conda_env: document.getElementById('f-conda').value || null,
@@ -367,8 +443,10 @@ async function handleSubmit(e) {
 // --- Abort ---
 async function abortTask(task_id) {
     if (!confirm(`Abort task ${task_id}?`)) return;
+    const user = getSelectedUser();
     try {
-        await apiFetch(`/tasks/${task_id}/abort`, { method: 'POST' });
+        const qs = user ? `?username=${encodeURIComponent(user)}` : '';
+        await apiFetch(`/tasks/${task_id}/abort` + qs, { method: 'POST' });
         showToast(`Task ${task_id} aborted`, 'info');
         refreshTasks();
     } catch (err) {
@@ -414,10 +492,91 @@ document.addEventListener('visibilitychange', () => {
     else if (!pollingInterval) { startPolling(); }
 });
 
+// --- Browse modal ---
+let browsePath = '';
+let browseSelected = '';
+
+function openBrowseModal() {
+    const user = getSelectedUser();
+    if (!user) { showToast('Please select a user first', 'error'); return; }
+    browsePath = '';
+    browseSelected = '';
+    document.getElementById('browse-selected').textContent = '';
+    document.getElementById('browse-modal').classList.remove('hidden');
+    loadBrowseDir('');
+}
+
+function closeBrowseModal() {
+    document.getElementById('browse-modal').classList.add('hidden');
+}
+
+async function loadBrowseDir(path) {
+    const user = getSelectedUser();
+    browsePath = path;
+    browseSelected = '/home/' + user + (path ? '/' + path : '');
+    document.getElementById('browse-selected').textContent = browseSelected;
+    renderBreadcrumb(path);
+
+    const list = document.getElementById('browse-list');
+    list.innerHTML = '<div class="text-gray-500 text-sm text-center py-4">Loading...</div>';
+    try {
+        const qs = path ? '?path=' + encodeURIComponent(path) : '';
+        const { directories } = await apiFetch('/workdirs/' + encodeURIComponent(user) + '/browse' + qs);
+        if (!directories.length) {
+            list.innerHTML = '<div class="text-gray-500 text-sm text-center py-4">No subdirectories</div>';
+            return;
+        }
+        list.innerHTML = directories.map(d => {
+            const name = d.split('/').pop();
+            return `<div class="flex items-center gap-2 px-3 py-2 rounded hover:bg-gray-800 cursor-pointer transition" onclick="loadBrowseDir('${d}')">
+                <svg class="w-4 h-4 text-yellow-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/></svg>
+                <span class="text-sm text-gray-300 font-mono">${name}</span>
+            </div>`;
+        }).join('');
+    } catch (e) {
+        list.innerHTML = '<div class="text-red-400 text-sm text-center py-4">' + e.message + '</div>';
+    }
+}
+
+function renderBreadcrumb(path) {
+    const user = getSelectedUser();
+    const bc = document.getElementById('browse-breadcrumb');
+    const parts = path ? path.split('/') : [];
+    let html = `<span class="cursor-pointer hover:text-blue-400 ${!path ? 'text-blue-400' : ''}" onclick="loadBrowseDir('')">${user}</span>`;
+    let accumulated = '';
+    for (const part of parts) {
+        accumulated += (accumulated ? '/' : '') + part;
+        const p = accumulated;
+        html += ` <span class="text-gray-600">/</span> <span class="cursor-pointer hover:text-blue-400 ${p === path ? 'text-blue-400' : ''}" onclick="loadBrowseDir('${p}')">${part}</span>`;
+    }
+    bc.innerHTML = html;
+}
+
+function confirmBrowseSelection() {
+    if (!browseSelected) { showToast('No directory selected', 'error'); return; }
+    const sel = document.getElementById('f-workdir');
+    // Add selected path as an option if not present
+    let found = false;
+    for (const opt of sel.options) {
+        if (opt.value === browseSelected) { found = true; break; }
+    }
+    if (!found) {
+        const opt = document.createElement('option');
+        opt.value = browseSelected;
+        opt.textContent = browseSelected;
+        sel.appendChild(opt);
+    }
+    sel.value = browseSelected;
+    sel.classList.remove('hidden');
+    document.getElementById('f-workdir-custom').classList.add('hidden');
+    closeBrowseModal();
+}
+
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeBrowseModal(); });
+
 // --- Init ---
-loadWorkdirs();
+loadUsers();
 loadGpus();
-loadCondaEnvs();
 startPolling();
 </script>
 </body>

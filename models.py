@@ -11,6 +11,7 @@ DB_PATH = "scheduler.db"
 CREATE_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS tasks (
     id                TEXT PRIMARY KEY,
+    username          TEXT NOT NULL DEFAULT '',
     command           TEXT NOT NULL,
     work_dir          TEXT NOT NULL,
     conda_env         TEXT,
@@ -33,13 +34,17 @@ WHERE state = 'RUNNING';
 """
 
 INSERT_SQL = """
-INSERT INTO tasks (id, command, work_dir, conda_env, preferred_gpu_id, priority, state, created_at)
-VALUES (?, ?, ?, ?, ?, ?, 'PENDING', ?);
+INSERT INTO tasks (id, username, command, work_dir, conda_env, preferred_gpu_id, priority, state, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?);
 """
 
 SELECT_ALL_SQL = "SELECT * FROM tasks ORDER BY created_at DESC;"
 
 SELECT_BY_STATE_SQL = "SELECT * FROM tasks WHERE state = ? ORDER BY created_at DESC;"
+
+SELECT_BY_USERNAME_SQL = "SELECT * FROM tasks WHERE username = ? ORDER BY created_at DESC;"
+
+SELECT_BY_STATE_AND_USERNAME_SQL = "SELECT * FROM tasks WHERE state = ? AND username = ? ORDER BY created_at DESC;"
 
 SELECT_BY_ID_SQL = "SELECT * FROM tasks WHERE id = ?;"
 
@@ -55,18 +60,19 @@ WHERE id = ? AND state = 'PENDING';
 
 UPDATE_FINISHED_SQL = """
 UPDATE tasks SET state = ?, exit_code = ?, finished_at = ?
-WHERE id = ?;
+WHERE id = ? AND state = 'RUNNING';
 """
 
-UPDATE_FAILED_SQL = """
-UPDATE tasks SET state = 'FAILED', exit_code = ?, finished_at = ?
-WHERE id = ?;
+SET_ABORTED_SQL = """
+UPDATE tasks SET state = 'FAILED', exit_code = -9, finished_at = ?
+WHERE id = ? AND state IN ('PENDING', 'RUNNING');
 """
 
 
 # --- Pydantic models ---
 
 class TaskSubmit(BaseModel):
+    username: str = Field(..., min_length=1)
     command: str = Field(..., min_length=1)
     work_dir: str = "."
     conda_env: str | None = None
@@ -76,6 +82,7 @@ class TaskSubmit(BaseModel):
 
 class TaskStatus(BaseModel):
     id: str
+    username: str
     command: str
     work_dir: str
     conda_env: str | None
@@ -122,7 +129,7 @@ async def insert_task(db: aiosqlite.Connection, submit: TaskSubmit) -> str:
     task_id = uuid.uuid4().hex[:12]
     await db.execute(
         INSERT_SQL,
-        (task_id, submit.command, submit.work_dir, submit.conda_env, submit.preferred_gpu_id, submit.priority, time.time()),
+        (task_id, submit.username, submit.command, submit.work_dir, submit.conda_env, submit.preferred_gpu_id, submit.priority, time.time()),
     )
     await db.commit()
     return task_id
@@ -135,15 +142,23 @@ async def get_pending_tasks(db: aiosqlite.Connection) -> list[dict]:
     return [dict(zip(cols, row)) for row in rows]
 
 
-async def set_task_running(db: aiosqlite.Connection, task_id: str, gpu_id: int, pid: int, log_path: str) -> None:
-    await db.execute(UPDATE_TO_RUNNING_SQL, (gpu_id, pid, time.time(), log_path, task_id))
+async def set_task_running(db: aiosqlite.Connection, task_id: str, gpu_id: int, pid: int, log_path: str) -> bool:
+    cursor = await db.execute(UPDATE_TO_RUNNING_SQL, (gpu_id, pid, time.time(), log_path, task_id))
     await db.commit()
+    return cursor.rowcount > 0
 
 
-async def set_task_finished(db: aiosqlite.Connection, task_id: str, exit_code: int) -> None:
+async def set_task_finished(db: aiosqlite.Connection, task_id: str, exit_code: int) -> bool:
     state = "COMPLETED" if exit_code == 0 else "FAILED"
-    await db.execute(UPDATE_FINISHED_SQL, (state, exit_code, time.time(), task_id))
+    cursor = await db.execute(UPDATE_FINISHED_SQL, (state, exit_code, time.time(), task_id))
     await db.commit()
+    return cursor.rowcount > 0
+
+
+async def set_task_aborted(db: aiosqlite.Connection, task_id: str) -> bool:
+    cursor = await db.execute(SET_ABORTED_SQL, (time.time(), task_id))
+    await db.commit()
+    return cursor.rowcount > 0
 
 
 async def get_task_by_id(db: aiosqlite.Connection, task_id: str) -> dict | None:
@@ -155,9 +170,13 @@ async def get_task_by_id(db: aiosqlite.Connection, task_id: str) -> dict | None:
     return dict(zip(cols, row))
 
 
-async def get_tasks(db: aiosqlite.Connection, state: str | None = None) -> list[dict]:
-    if state:
+async def get_tasks(db: aiosqlite.Connection, state: str | None = None, username: str | None = None) -> list[dict]:
+    if state and username:
+        cursor = await db.execute(SELECT_BY_STATE_AND_USERNAME_SQL, (state, username))
+    elif state:
         cursor = await db.execute(SELECT_BY_STATE_SQL, (state,))
+    elif username:
+        cursor = await db.execute(SELECT_BY_USERNAME_SQL, (username,))
     else:
         cursor = await db.execute(SELECT_ALL_SQL)
     rows = await cursor.fetchall()
@@ -173,6 +192,7 @@ def row_to_status(row: dict) -> TaskStatus:
         duration = round(end - row["started_at"], 2)
     return TaskStatus(
         id=row["id"],
+        username=row["username"],
         command=row["command"],
         work_dir=row["work_dir"],
         conda_env=row["conda_env"],

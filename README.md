@@ -6,12 +6,20 @@ A GPU workload manager that prevents resource contention on multi-GPU machines. 
 
 - **GPU isolation** via `CUDA_VISIBLE_DEVICES` — each job sees only its assigned GPU
 - **Priority queue** — higher-priority tasks dispatch first
-- **Conda environment support** — specify a conda env per task, activated automatically
+- **Multi-user aware** — per-user conda environments and working directories
+- **Conda environment support** — specify a conda env per task, python binary resolved automatically
 - **Manual GPU selection** — pin a task to a specific GPU or let the scheduler auto-assign
 - **Persistent queue** — SQLite-backed task state survives server restarts
-- **Crash recovery** — orphaned tasks from a previous crash are marked FAILED on startup
+- **Crash recovery** — orphaned tasks from a previous crash are marked `FAILED` on startup
 - **Live dashboard** — web UI with GPU monitoring, task submission, log viewing, and abort
 - **Process group management** — abort kills the entire process tree, not just the parent
+- **Live log viewing** — view stdout/stderr while a task is still running
+
+## Screenshots
+
+<p align="center">
+  <img src="doc/dashboard.png" width="100%">
+</p>
 
 ## Project Structure
 
@@ -22,6 +30,7 @@ rl-scheduler/
 ├── scheduler.py      # Async orchestrator loop, task dispatch, subprocess management
 ├── hardware.py       # pynvml GPU telemetry and availability checks
 ├── requirements.txt  # Python dependencies
+├── start.sh          # Convenience launcher (sudo python3 main.py)
 ├── static/
 │   └── index.html    # Single-page dashboard (Tailwind CSS + vanilla JS)
 ├── logs/             # Auto-created; per-task stdout/stderr logs
@@ -46,7 +55,8 @@ pip install -r requirements.txt
 Start the server:
 
 ```bash
-python main.py
+sudo -E python3 main.py
+# or: ./start.sh
 ```
 
 The server runs on `http://0.0.0.0:8000`. Opening this URL in a browser loads the dashboard.
@@ -57,7 +67,7 @@ The server runs on `http://0.0.0.0:8000`. Opening this URL in a browser loads th
 # Submit a task
 curl -X POST http://localhost:8000/tasks/submit \
   -H "Content-Type: application/json" \
-  -d '{"command": "echo hello && sleep 2", "work_dir": "/tmp"}'
+  -d '{"username": "your-user", "command": "echo hello && sleep 2", "work_dir": "/tmp"}'
 
 # Check task status
 curl http://localhost:8000/tasks/status
@@ -66,23 +76,19 @@ curl http://localhost:8000/tasks/status
 curl http://localhost:8000/gpus
 ```
 
-## Configuration
-
-| Environment Variable | Default | Description |
-|---------------------|---------|-------------|
-| `RLS_WORKDIR_ROOT`  | `~`     | Root directory for the working directory dropdown in the UI |
-
 ## REST API
 
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/tasks/submit` | Submit a new task |
-| `GET`  | `/tasks/status` | List tasks (optional `?state=` filter) |
-| `POST` | `/tasks/{task_id}/abort` | Force-kill a running task |
-| `GET`  | `/tasks/{task_id}/log` | Get task log output |
+| `GET`  | `/tasks/status` | List tasks (optional `?state=` and `?username=` filters) |
+| `POST` | `/tasks/{task_id}/abort` | Force-kill a running or pending task |
+| `GET`  | `/tasks/{task_id}/log` | Get task log output (works while running) |
 | `GET`  | `/gpus` | Live GPU telemetry (temp, VRAM, active task) |
-| `GET`  | `/conda/envs` | List available conda environments |
-| `GET`  | `/workdirs` | List directories under `RLS_WORKDIR_ROOT` |
+| `GET`  | `/users` | List system users (uid ≥ 1000 with valid home dir) |
+| `GET`  | `/conda/envs/{username}` | List conda environments available to a user |
+| `GET`  | `/workdirs/{username}` | List top-level directories in user's home |
+| `GET`  | `/workdirs/{username}/browse` | Browse subdirectories in user's home (`?path=`) |
 | `GET`  | `/health` | System health summary |
 
 ### Submit a task
@@ -91,19 +97,22 @@ curl http://localhost:8000/gpus
 curl -X POST http://localhost:8000/tasks/submit \
   -H "Content-Type: application/json" \
   -d '{
+    "username": "your-user",
     "command": "python train.py --epochs 100",
-    "work_dir": "/home/user/project",
+    "work_dir": "/home/your-user/project",
     "conda_env": "my-env",
     "preferred_gpu_id": 0,
     "priority": 10
   }'
 ```
 
-All fields except `command` are optional:
-- `work_dir` — working directory for the subprocess (default: `.`)
-- `conda_env` — conda environment name to activate before running (default: null)
-- `preferred_gpu_id` — pin to a specific GPU, or null for auto-assign (default: null)
-- `priority` — higher values dispatch first (default: 0)
+Fields:
+- `username` **(required)** — the system user to run the command as
+- `command` **(required)** — the shell command to execute
+- `work_dir` (default: `.`) — working directory for the subprocess
+- `conda_env` (default: null) — conda environment name; `python`/`python3` in the command is replaced with the env's python binary
+- `preferred_gpu_id` (default: null) — pin to a specific GPU, or null for auto-assign
+- `priority` (default: 0) — higher values dispatch first
 
 ### List tasks
 
@@ -113,12 +122,19 @@ curl http://localhost:8000/tasks/status
 
 # Filter by state
 curl "http://localhost:8000/tasks/status?state=RUNNING"
+
+# Filter by user
+curl "http://localhost:8000/tasks/status?username=alice"
+
+# Combined
+curl "http://localhost:8000/tasks/status?state=RUNNING&username=alice"
 ```
 
 ### Abort a task
 
 ```bash
-curl -X POST http://localhost:8000/tasks/{task_id}/abort
+# Abort by task ID (optionally scoped to a user)
+curl -X POST "http://localhost:8000/tasks/{task_id}/abort?username=your-user"
 ```
 
 ### View task logs
@@ -127,13 +143,14 @@ curl -X POST http://localhost:8000/tasks/{task_id}/abort
 curl http://localhost:8000/tasks/{task_id}/log
 ```
 
+Works while the task is running — output is streamed to the log file in real time.
+
 ## Task Lifecycle
 
 ```
 PENDING  ──dispatch──>  RUNNING  ──exit 0──>  COMPLETED
-                          │
-                          └──exit non-zero──>  FAILED
-                          └──abort──────────>  FAILED
+    │                       │
+    └──abort──────────────> FAILED
 ```
 
 - **PENDING** — queued, waiting for a free GPU
@@ -147,17 +164,11 @@ Each task gets `CUDA_VISIBLE_DEVICES=<gpu_id>` injected into its environment. Th
 
 A GPU is considered "available" when:
 1. No scheduler-managed task is currently running on it
-2. Its VRAM usage is below 500 MB (prevents overriding manually-started jobs)
+2. No non-MPS compute processes are running on it (detected via NVML)
 
 ## Conda Support
 
-If `conda_env` is specified, the command is wrapped with:
-
-```
-conda run -n <env> --no-capture-output --live-stream <command>
-```
-
-This activates the environment cleanly without shell sourcing, passes through stdout/stderr for log capture, and deactivates on exit. The environment must already exist on the system.
+If `conda_env` is specified, the scheduler locates the target environment's python binary at `/home/<user>/<conda_dir>/envs/<env>/bin/python` (checking miniconda3, anaconda3, and miniforge3). It then replaces `python` or `python3` in the command with the full path to the env's python. The command runs under `bash -l` so conda-initialized shell environments are picked up.
 
 ## Crash Recovery
 

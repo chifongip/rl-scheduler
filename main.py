@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import os
-import subprocess
 from contextlib import asynccontextmanager
 
 import aiosqlite
@@ -96,6 +94,38 @@ class WorkdirListResponse(BaseModel):
     directories: list[str]
 
 
+class UsersListResponse(BaseModel):
+    users: list[str]
+
+
+# --- Helpers ---
+
+def _scan_user_conda_envs(username: str) -> set[str]:
+    user_home = f"/home/{username}"
+    envs: set[str] = set()
+    for conda_dir in ("anaconda3", "miniconda3", "miniforge3"):
+        envs_path = os.path.join(user_home, conda_dir, "envs")
+        if os.path.isdir(envs_path):
+            for entry in os.listdir(envs_path):
+                full = os.path.join(envs_path, entry)
+                if os.path.isdir(full) and not entry.startswith("."):
+                    envs.add(entry)
+    conda_envs_file = os.path.join(user_home, ".conda", "environments.txt")
+    if os.path.isfile(conda_envs_file):
+        try:
+            with open(conda_envs_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        name = os.path.basename(line)
+                        if name and not name.startswith("."):
+                            envs.add(name)
+        except OSError:
+            pass
+    envs.add("base")
+    return envs
+
+
 # --- Endpoints ---
 
 @app.post("/tasks/submit", response_model=SubmitResponse)
@@ -112,29 +142,20 @@ async def submit_task(body: TaskSubmit):
                 detail=f"Invalid GPU ID {body.preferred_gpu_id}. Managed GPUs: {gpu_manager.managed_gpu_ids}",
             )
 
-    # Validate conda_env if provided
+    # Validate conda_env if provided — scan user's filesystem for conda installations
     if body.conda_env is not None:
-        if not shutil.which("conda"):
-            raise HTTPException(status_code=400, detail="conda is not installed or not on PATH")
-        try:
-            result = subprocess.run(
-                ["conda", "env", "list", "--json"],
-                capture_output=True, text=True, timeout=10,
+        user_home = f"/home/{body.username}"
+        if not os.path.isdir(user_home):
+            raise HTTPException(status_code=400, detail=f"User home not found: {user_home}")
+        env_names = _scan_user_conda_envs(body.username)
+        if body.conda_env not in env_names:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Conda environment '{body.conda_env}' not found for user '{body.username}'. Available: {sorted(env_names)}",
             )
-            env_data = json.loads(result.stdout)
-            env_names = [os.path.basename(p) for p in env_data.get("envs", [])]
-            # "base" is always valid even if listed as prefix
-            if body.conda_env not in env_names and body.conda_env != "base":
-                raise HTTPException(
-                    status_code=400,
-                    detail=f"Conda environment '{body.conda_env}' not found. Available: {env_names}",
-                )
-        except FileNotFoundError:
-            raise HTTPException(status_code=400, detail="conda command not found")
-        except (subprocess.TimeoutExpired, json.JSONDecodeError) as e:
-            raise HTTPException(status_code=500, detail=f"Failed to query conda environments: {e}")
 
     task_id = await scheduler.submit_task(
+        username=body.username,
         command=body.command,
         work_dir=body.work_dir,
         priority=body.priority,
@@ -145,18 +166,20 @@ async def submit_task(body: TaskSubmit):
 
 
 @app.get("/tasks/status", response_model=TaskListResponse)
-async def get_task_status(state: str | None = None):
-    tasks = await scheduler.get_tasks(state=state)
+async def get_task_status(state: str | None = None, username: str | None = None):
+    tasks = await scheduler.get_tasks(state=state, username=username)
     return TaskListResponse(tasks=[t.model_dump() for t in tasks])
 
 
 @app.post("/tasks/{task_id}/abort", response_model=AbortResponse)
-async def abort_task(task_id: str):
+async def abort_task(task_id: str, username: str | None = None):
     row = await get_task_by_id(db, task_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
-    if row["state"] != "RUNNING":
-        raise HTTPException(status_code=400, detail=f"Task is not RUNNING (state={row['state']})")
+    if row["state"] not in ("PENDING", "RUNNING"):
+        raise HTTPException(status_code=400, detail=f"Cannot abort task in state {row['state']}")
+    if username and row["username"] != username:
+        raise HTTPException(status_code=403, detail=f"Task belongs to user '{row['username']}', not '{username}'")
     success = await scheduler.abort_task(task_id)
     return AbortResponse(success=success, task_id=task_id)
 
@@ -167,20 +190,31 @@ async def get_gpus():
     return GpuListResponse(gpus=[s.model_dump() for s in statuses])
 
 
-@app.get("/conda/envs", response_model=CondaEnvListResponse)
-async def list_conda_envs():
+@app.get("/users", response_model=UsersListResponse)
+async def list_users():
+    users = []
     try:
-        result = subprocess.run(
-            ["conda", "env", "list", "--json"],
-            capture_output=True, text=True, timeout=10,
-        )
-        env_data = json.loads(result.stdout)
-        env_names = sorted({os.path.basename(p) for p in env_data.get("envs", [])})
-        return CondaEnvListResponse(environments=env_names)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="conda is not installed or not on PATH")
-    except (subprocess.TimeoutExpired, json.JSONDecodeError) as e:
-        raise HTTPException(status_code=500, detail=f"Failed to query conda: {e}")
+        with open("/etc/passwd") as f:
+            for line in f:
+                parts = line.strip().split(":")
+                if len(parts) >= 6:
+                    uid = int(parts[2])
+                    home = parts[5]
+                    username = parts[0]
+                    if uid >= 1000 and os.path.isdir(home):
+                        users.append(username)
+    except OSError:
+        pass
+    return UsersListResponse(users=sorted(users))
+
+
+@app.get("/conda/envs/{username}", response_model=CondaEnvListResponse)
+async def list_conda_envs(username: str):
+    user_home = f"/home/{username}"
+    if not os.path.isdir(user_home):
+        raise HTTPException(status_code=404, detail=f"User home directory not found: {user_home}")
+    envs = _scan_user_conda_envs(username)
+    return CondaEnvListResponse(environments=sorted(envs))
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -195,17 +229,43 @@ async def health():
     )
 
 
-@app.get("/workdirs", response_model=WorkdirListResponse)
-async def list_workdirs():
-    root = os.environ.get("RLS_WORKDIR_ROOT", os.path.expanduser("~"))
-    dirs = []
+@app.get("/workdirs/{username}", response_model=WorkdirListResponse)
+async def list_workdirs(username: str):
+    root = f"/home/{username}"
+    if not os.path.isdir(root):
+        raise HTTPException(status_code=404, detail=f"User home directory not found: {root}")
     try:
+        dirs = []
         for entry in sorted(os.listdir(root)):
             full = os.path.join(root, entry)
             if os.path.isdir(full) and not entry.startswith("."):
                 dirs.append(full)
-    except OSError:
-        pass
+    except PermissionError:
+        raise HTTPException(status_code=403, detail=f"Permission denied: cannot read {root}")
+    return WorkdirListResponse(directories=dirs)
+
+
+@app.get("/workdirs/{username}/browse", response_model=WorkdirListResponse)
+async def browse_workdirs(username: str, path: str = ""):
+    user_home = f"/home/{username}"
+    if path:
+        root = os.path.join(user_home, path)
+    else:
+        root = user_home
+    real_home = os.path.realpath(user_home)
+    real_root = os.path.realpath(root)
+    if not real_root.startswith(real_home + os.sep) and real_root != real_home:
+        raise HTTPException(status_code=403, detail="Path must be within user's home directory")
+    if not os.path.isdir(root):
+        raise HTTPException(status_code=404, detail=f"Directory not found: {root}")
+    try:
+        dirs = []
+        for entry in sorted(os.listdir(root)):
+            full = os.path.join(root, entry)
+            if os.path.isdir(full) and not entry.startswith("."):
+                dirs.append(os.path.join(path, entry) if path else entry)
+    except PermissionError:
+        raise HTTPException(status_code=403, detail=f"Permission denied: {root}")
     return WorkdirListResponse(directories=dirs)
 
 
@@ -221,9 +281,6 @@ async def get_task_log(task_id: str):
         content = f.read()
     return PlainTextResponse(content)
 
-
-# Need shutil for conda check
-import shutil
 
 # Static files mount must be after all API routes to avoid path conflicts
 app.mount("/static", StaticFiles(directory="static"), name="static")
