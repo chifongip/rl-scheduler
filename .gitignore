@@ -1,0 +1,7 @@
+**/__pycache__/
+*.pyc
+.claude/
+logs/
+notes/
+scheduler.db
+.env

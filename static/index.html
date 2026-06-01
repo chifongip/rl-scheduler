@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>rl-scheduler</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @keyframes pulse-dot { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+        .pulse-dot { animation: pulse-dot 2s ease-in-out infinite; }
+        @keyframes badge-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
+        .badge-running { animation: badge-pulse 1.5s ease-in-out infinite; }
+        .toast { transition: opacity 0.3s, transform 0.3s; }
+        .modal-bg { background: rgba(0,0,0,0.5); }
+    </style>
+</head>
+<body class="bg-gray-950 text-gray-100 min-h-screen">
+
+<!-- Toast container -->
+<div id="toasts" class="fixed top-4 right-4 z-50 flex flex-col gap-2"></div>
+
+<!-- Header -->
+<header class="bg-gray-900 border-b border-gray-800 px-6 py-3 flex items-center justify-between">
+    <div class="flex items-center gap-3">
+        <h1 class="text-xl font-bold tracking-tight">rl-scheduler</h1>
+        <div id="health-indicator" class="flex items-center gap-1.5 text-sm">
+            <span class="w-2 h-2 rounded-full bg-gray-500"></span>
+            <span class="text-gray-400">Connecting...</span>
+        </div>
+    </div>
+    <div class="flex items-center gap-3 text-sm">
+        <span id="stat-gpus" class="bg-gray-800 px-2.5 py-1 rounded">-- GPUs</span>
+        <span id="stat-running" class="bg-gray-800 px-2.5 py-1 rounded">-- Running</span>
+        <span id="stat-pending" class="bg-gray-800 px-2.5 py-1 rounded">-- Pending</span>
+        <span id="last-updated" class="text-gray-500 text-xs ml-2"></span>
+    </div>
+</header>
+
+<main class="max-w-7xl mx-auto px-4 py-6 space-y-6">
+
+    <!-- GPU Status Panel -->
+    <section>
+        <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">GPU Status</h2>
+        <div id="gpu-cards" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+            <div class="bg-gray-900 rounded-lg p-4 border border-gray-800 text-gray-500 text-sm">Loading...</div>
+        </div>
+    </section>
+
+    <!-- Task Submission Form -->
+    <section class="bg-gray-900 rounded-lg border border-gray-800">
+        <button id="form-toggle" class="w-full px-5 py-3 flex items-center justify-between text-left" onclick="toggleForm()">
+            <span class="text-sm font-semibold text-gray-400 uppercase tracking-wider">Submit Task</span>
+            <svg id="form-chevron" class="w-4 h-4 text-gray-500 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+        </button>
+        <div id="form-body" class="hidden px-5 pb-5">
+            <form id="submit-form" onsubmit="handleSubmit(event)" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div class="md:col-span-2">
+                    <label class="block text-xs text-gray-400 mb-1">Command</label>
+                    <textarea id="f-command" required rows="2" placeholder="python train.py --epochs 100"
+                        class="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm font-mono focus:outline-none focus:border-blue-500"></textarea>
+                </div>
+                <div>
+                    <label class="block text-xs text-gray-400 mb-1">Working Directory</label>
+                    <select id="f-workdir"
+                        class="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm font-mono focus:outline-none focus:border-blue-500">
+                        <option value=".">.</option>
+                    </select>
+                    <input id="f-workdir-custom" type="text" placeholder="/path/to/project"
+                        class="hidden w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm font-mono focus:outline-none focus:border-blue-500 mt-1">
+                </div>
+                <div>
+                    <label class="block text-xs text-gray-400 mb-1">Conda Environment</label>
+                    <select id="f-conda"
+                        class="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500">
+                        <option value="">None</option>
+                    </select>
+                </div>
+                <div>
+                    <label class="block text-xs text-gray-400 mb-1">Priority</label>
+                    <input id="f-priority" type="number" value="0" min="0"
+                        class="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500">
+                </div>
+                <div>
+                    <label class="block text-xs text-gray-400 mb-1">GPU</label>
+                    <select id="f-gpu"
+                        class="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500">
+                        <option value="">Auto</option>
+                    </select>
+                </div>
+                <div class="flex items-end">
+                    <button type="submit" class="bg-blue-600 hover:bg-blue-500 text-white px-5 py-2 rounded text-sm font-medium transition">
+                        Submit
+                    </button>
+                </div>
+            </form>
+        </div>
+    </section>
+
+    <!-- Task List -->
+    <section>
+        <div class="flex items-center justify-between mb-3">
+            <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider">Tasks</h2>
+            <div class="flex gap-1" id="filter-tabs">
+                <button onclick="setFilter(null)" class="filter-tab active px-3 py-1 text-xs rounded bg-gray-800 text-gray-300 hover:bg-gray-700 transition">All</button>
+                <button onclick="setFilter('PENDING')" class="filter-tab px-3 py-1 text-xs rounded text-gray-500 hover:bg-gray-800 transition">Pending</button>
+                <button onclick="setFilter('RUNNING')" class="filter-tab px-3 py-1 text-xs rounded text-gray-500 hover:bg-gray-800 transition">Running</button>
+                <button onclick="setFilter('COMPLETED')" class="filter-tab px-3 py-1 text-xs rounded text-gray-500 hover:bg-gray-800 transition">Completed</button>
+                <button onclick="setFilter('FAILED')" class="filter-tab px-3 py-1 text-xs rounded text-gray-500 hover:bg-gray-800 transition">Failed</button>
+            </div>
+        </div>
+        <div class="bg-gray-900 rounded-lg border border-gray-800 overflow-hidden">
+            <table class="w-full text-sm">
+                <thead>
+                    <tr class="text-xs text-gray-500 uppercase border-b border-gray-800">
+                        <th class="px-4 py-2.5 text-left">ID</th>
+                        <th class="px-4 py-2.5 text-left">Command</th>
+                        <th class="px-4 py-2.5 text-left">GPU</th>
+                        <th class="px-4 py-2.5 text-center">Priority</th>
+                        <th class="px-4 py-2.5 text-center">State</th>
+                        <th class="px-4 py-2.5 text-right">Duration</th>
+                        <th class="px-4 py-2.5 text-right">Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="task-tbody">
+                    <tr><td colspan="7" class="px-4 py-8 text-center text-gray-500">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+</main>
+
+<!-- Log Modal -->
+<div id="log-modal" class="fixed inset-0 z-40 hidden flex items-center justify-center modal-bg" onclick="if(event.target===this)closeLogModal()">
+    <div class="bg-gray-900 rounded-lg border border-gray-700 w-full max-w-4xl max-h-[85vh] flex flex-col mx-4">
+        <div class="flex items-center justify-between px-5 py-3 border-b border-gray-800">
+            <div>
+                <h3 class="font-semibold text-sm">Task Log</h3>
+                <p id="log-meta" class="text-xs text-gray-500 mt-0.5"></p>
+            </div>
+            <button onclick="closeLogModal()" class="text-gray-500 hover:text-gray-300 text-xl">&times;</button>
+        </div>
+        <pre id="log-content" class="flex-1 overflow-auto px-5 py-4 text-xs font-mono text-gray-300 whitespace-pre-wrap"></pre>
+    </div>
+</div>
+
+<script>
+const API = '';
+let currentFilter = null;
+let pollingInterval = null;
+
+// --- Toast notifications ---
+function showToast(message, type = 'info') {
+    const container = document.getElementById('toasts');
+    const colors = { info: 'bg-blue-600', success: 'bg-green-600', error: 'bg-red-600' };
+    const el = document.createElement('div');
+    el.className = `toast ${colors[type] || colors.info} text-white px-4 py-2 rounded shadow-lg text-sm max-w-sm`;
+    el.textContent = message;
+    container.appendChild(el);
+    setTimeout(() => { el.style.opacity = '0'; el.style.transform = 'translateX(100%)'; }, 3000);
+    setTimeout(() => el.remove(), 3500);
+}
+
+// --- Form toggle ---
+function toggleForm() {
+    const body = document.getElementById('form-body');
+    const chevron = document.getElementById('form-chevron');
+    body.classList.toggle('hidden');
+    chevron.style.transform = body.classList.contains('hidden') ? '' : 'rotate(180deg)';
+}
+
+// --- API helpers ---
+async function apiFetch(path, opts = {}) {
+    const res = await fetch(API + path, { headers: { 'Content-Type': 'application/json' }, ...opts });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    return data;
+}
+
+// --- Health & stats ---
+async function refreshHealth() {
+    try {
+        const h = await apiFetch('/health');
+        const dot = document.querySelector('#health-indicator span:first-child');
+        const label = document.querySelector('#health-indicator span:last-child');
+        dot.className = 'w-2 h-2 rounded-full bg-green-400 pulse-dot';
+        label.className = 'text-green-400 text-sm';
+        label.textContent = 'System OK';
+        document.getElementById('stat-gpus').textContent = `${h.gpus_managed} GPUs`;
+        document.getElementById('stat-running').textContent = `${h.tasks_running} Running`;
+        document.getElementById('stat-pending').textContent = `${h.tasks_pending} Pending`;
+    } catch {
+        const dot = document.querySelector('#health-indicator span:first-child');
+        const label = document.querySelector('#health-indicator span:last-child');
+        dot.className = 'w-2 h-2 rounded-full bg-red-500';
+        label.className = 'text-red-400 text-sm';
+        label.textContent = 'Disconnected';
+    }
+}
+
+// --- GPU cards ---
+function tempColor(t) { return t < 60 ? 'text-green-400' : t < 80 ? 'text-yellow-400' : 'text-red-400'; }
+function memColor(pct) { return pct < 50 ? 'bg-green-500' : pct < 80 ? 'bg-yellow-500' : 'bg-red-500'; }
+
+async function refreshGpus() {
+    try {
+        const { gpus } = await apiFetch('/gpus');
+        const container = document.getElementById('gpu-cards');
+        if (!gpus.length) { container.innerHTML = '<div class="text-gray-500 text-sm">No GPUs managed</div>'; return; }
+        container.innerHTML = gpus.map(g => `
+            <div class="bg-gray-900 rounded-lg p-4 border border-gray-800">
+                <div class="flex items-center justify-between mb-2">
+                    <span class="font-semibold text-sm">GPU ${g.gpu_id}</span>
+                    <span class="text-xs ${g.active_task_id ? 'text-blue-400' : 'text-gray-500'}">${g.active_task_id ? 'Running' : 'Idle'}</span>
+                </div>
+                <div class="text-xs text-gray-400 mb-3 truncate">${g.name}</div>
+                <div class="flex items-center gap-4 mb-3">
+                    <div>
+                        <div class="text-xs text-gray-500">Temp</div>
+                        <div class="text-lg font-bold ${tempColor(g.temperature_c)}">${g.temperature_c}&deg;C</div>
+                    </div>
+                    <div>
+                        <div class="text-xs text-gray-500">VRAM</div>
+                        <div class="text-lg font-bold">${g.memory_used_mb}<span class="text-xs text-gray-500 font-normal">/${g.memory_total_mb} MB</span></div>
+                    </div>
+                </div>
+                <div class="w-full bg-gray-800 rounded-full h-2">
+                    <div class="${memColor(g.memory_utilization_pct)} h-2 rounded-full transition-all" style="width:${Math.min(g.memory_utilization_pct, 100)}%"></div>
+                </div>
+                <div class="text-xs text-gray-500 mt-1 text-right">${g.memory_utilization_pct}%</div>
+                ${g.active_task_id ? `<div class="text-xs text-gray-500 mt-1 truncate">Task: <span class="text-gray-400 font-mono">${g.active_task_id}</span></div>` : ''}
+            </div>
+        `).join('');
+    } catch (e) { console.error('GPU refresh failed:', e); }
+}
+
+// --- Workdirs ---
+async function loadWorkdirs() {
+    try {
+        const { directories } = await apiFetch('/workdirs');
+        const sel = document.getElementById('f-workdir');
+        const opts = ['<option value=".">.</option>'] +
+            directories.map(d => `<option value="${d}">${d}</option>`).join('') +
+            '<option value="__custom__">Custom...</option>';
+        sel.innerHTML = opts;
+    } catch {
+        // leave default "." option
+    }
+}
+
+document.getElementById('f-workdir').addEventListener('change', function() {
+    const custom = document.getElementById('f-workdir-custom');
+    if (this.value === '__custom__') {
+        custom.classList.remove('hidden');
+        custom.focus();
+    } else {
+        custom.classList.add('hidden');
+    }
+});
+
+// --- GPU selector ---
+async function loadGpus() {
+    try {
+        const { gpus } = await apiFetch('/gpus');
+        const sel = document.getElementById('f-gpu');
+        sel.innerHTML = '<option value="">Auto</option>' +
+            gpus.map(g => `<option value="${g.gpu_id}">GPU ${g.gpu_id} — ${g.name}</option>`).join('');
+    } catch {
+        // leave "Auto" only
+    }
+}
+
+// --- Conda envs ---
+async function loadCondaEnvs() {
+    try {
+        const { environments } = await apiFetch('/conda/envs');
+        const sel = document.getElementById('f-conda');
+        sel.innerHTML = '<option value="">None</option>' + environments.map(e => `<option value="${e}">${e}</option>`).join('');
+    } catch {
+        // conda not available, leave as "None" only
+    }
+}
+
+// --- Task list ---
+function stateBadge(state) {
+    const colors = {
+        PENDING: 'bg-yellow-900 text-yellow-300',
+        RUNNING: 'bg-blue-900 text-blue-300 badge-running',
+        COMPLETED: 'bg-green-900 text-green-300',
+        FAILED: 'bg-red-900 text-red-300',
+    };
+    return `<span class="px-2 py-0.5 rounded text-xs font-medium ${colors[state] || 'bg-gray-800 text-gray-400'}">${state}</span>`;
+}
+
+function formatDuration(d) {
+    if (d == null) return '--';
+    if (d < 60) return `${d.toFixed(1)}s`;
+    if (d < 3600) return `${Math.floor(d/60)}m ${Math.floor(d%60)}s`;
+    return `${Math.floor(d/3600)}h ${Math.floor((d%3600)/60)}m`;
+}
+
+async function refreshTasks() {
+    try {
+        const qs = currentFilter ? `?state=${currentFilter}` : '';
+        const { tasks } = await apiFetch('/tasks/status' + qs);
+        const tbody = document.getElementById('task-tbody');
+        if (!tasks.length) {
+            tbody.innerHTML = `<tr><td colspan="7" class="px-4 py-8 text-center text-gray-500">No tasks${currentFilter ? ' with state ' + currentFilter : ''}</td></tr>`;
+            return;
+        }
+        tbody.innerHTML = tasks.map(t => `
+            <tr class="border-b border-gray-800 hover:bg-gray-800/50 transition">
+                <td class="px-4 py-2.5 font-mono text-xs text-gray-400">${t.id}</td>
+                <td class="px-4 py-2.5 font-mono text-xs max-w-xs truncate" title="${escapeHtml(t.command)}">${escapeHtml(t.command)}</td>
+                <td class="px-4 py-2.5 text-xs">${t.gpu_id != null ? 'GPU ' + t.gpu_id : '--'}</td>
+                <td class="px-4 py-2.5 text-center text-xs">${t.priority}</td>
+                <td class="px-4 py-2.5 text-center">${stateBadge(t.state)}</td>
+                <td class="px-4 py-2.5 text-right text-xs text-gray-400">${formatDuration(t.duration)}</td>
+                <td class="px-4 py-2.5 text-right">
+                    ${t.state === 'RUNNING' ? `<button onclick="abortTask('${t.id}')" class="bg-red-600/80 hover:bg-red-500 text-white px-2.5 py-1 rounded text-xs transition">Abort</button>` : ''}
+                    ${t.state === 'COMPLETED' || t.state === 'FAILED' ? `<button onclick="viewLog('${t.id}', '${escapeHtml(t.command)}', ${t.exit_code}, ${t.duration})" class="bg-gray-700 hover:bg-gray-600 text-gray-300 px-2.5 py-1 rounded text-xs transition">Log</button>` : ''}
+                </td>
+            </tr>
+        `).join('');
+    } catch (e) { console.error('Task refresh failed:', e); }
+}
+
+function escapeHtml(s) {
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// --- Filter tabs ---
+function setFilter(state) {
+    currentFilter = state;
+    document.querySelectorAll('.filter-tab').forEach(btn => {
+        const isActive = (state === null && btn.textContent === 'All') || btn.textContent.toUpperCase() === state;
+        btn.className = isActive
+            ? 'filter-tab active px-3 py-1 text-xs rounded bg-gray-800 text-gray-300 hover:bg-gray-700 transition'
+            : 'filter-tab px-3 py-1 text-xs rounded text-gray-500 hover:bg-gray-800 transition';
+    });
+    refreshTasks();
+}
+
+// --- Submit ---
+async function handleSubmit(e) {
+    e.preventDefault();
+    const workdirSel = document.getElementById('f-workdir').value;
+    const workdirCustom = document.getElementById('f-workdir-custom').value.trim();
+    const workDir = workdirSel === '__custom__' ? (workdirCustom || '.') : workdirSel;
+    const gpuVal = document.getElementById('f-gpu').value;
+    const body = {
+        command: document.getElementById('f-command').value.trim(),
+        work_dir: workDir,
+        conda_env: document.getElementById('f-conda').value || null,
+        preferred_gpu_id: gpuVal !== '' ? parseInt(gpuVal) : null,
+        priority: parseInt(document.getElementById('f-priority').value) || 0,
+    };
+    try {
+        const { task_id } = await apiFetch('/tasks/submit', { method: 'POST', body: JSON.stringify(body) });
+        showToast(`Task ${task_id} submitted`, 'success');
+        document.getElementById('f-command').value = '';
+        refreshTasks();
+    } catch (err) {
+        showToast(err.message, 'error');
+    }
+}
+
+// --- Abort ---
+async function abortTask(task_id) {
+    if (!confirm(`Abort task ${task_id}?`)) return;
+    try {
+        await apiFetch(`/tasks/${task_id}/abort`, { method: 'POST' });
+        showToast(`Task ${task_id} aborted`, 'info');
+        refreshTasks();
+    } catch (err) {
+        showToast(err.message, 'error');
+    }
+}
+
+// --- Log modal ---
+async function viewLog(task_id, command, exit_code, duration) {
+    document.getElementById('log-meta').textContent = `${task_id} | ${command} | exit: ${exit_code} | ${formatDuration(duration)}`;
+    document.getElementById('log-content').textContent = 'Loading...';
+    document.getElementById('log-modal').classList.remove('hidden');
+    try {
+        const res = await fetch(`${API}/tasks/${task_id}/log`);
+        if (!res.ok) throw new Error('Log not found');
+        document.getElementById('log-content').textContent = await res.text();
+    } catch (e) {
+        document.getElementById('log-content').textContent = 'Failed to load log: ' + e.message;
+    }
+}
+
+function closeLogModal() {
+    document.getElementById('log-modal').classList.add('hidden');
+}
+
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeLogModal(); });
+
+// --- Polling ---
+function startPolling() {
+    refreshHealth();
+    refreshGpus();
+    refreshTasks();
+    pollingInterval = setInterval(() => {
+        refreshHealth();
+        refreshGpus();
+        refreshTasks();
+        document.getElementById('last-updated').textContent = new Date().toLocaleTimeString();
+    }, 3000);
+}
+
+document.addEventListener('visibilitychange', () => {
+    if (document.hidden) { clearInterval(pollingInterval); pollingInterval = null; }
+    else if (!pollingInterval) { startPolling(); }
+});
+
+// --- Init ---
+loadWorkdirs();
+loadGpus();
+loadCondaEnvs();
+startPolling();
+</script>
+</body>
+</html>
