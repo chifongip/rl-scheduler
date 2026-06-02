@@ -106,12 +106,15 @@
     <section>
         <div class="flex items-center justify-between mb-3">
             <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider">Tasks</h2>
-            <div class="flex gap-1" id="filter-tabs">
-                <button onclick="setFilter(null)" class="filter-tab active px-3 py-1 text-xs rounded bg-gray-800 text-gray-300 hover:bg-gray-700 transition">All</button>
-                <button onclick="setFilter('PENDING')" class="filter-tab px-3 py-1 text-xs rounded text-gray-500 hover:bg-gray-800 transition">Pending</button>
-                <button onclick="setFilter('RUNNING')" class="filter-tab px-3 py-1 text-xs rounded text-gray-500 hover:bg-gray-800 transition">Running</button>
-                <button onclick="setFilter('COMPLETED')" class="filter-tab px-3 py-1 text-xs rounded text-gray-500 hover:bg-gray-800 transition">Completed</button>
-                <button onclick="setFilter('FAILED')" class="filter-tab px-3 py-1 text-xs rounded text-gray-500 hover:bg-gray-800 transition">Failed</button>
+            <div class="flex items-center gap-2">
+                <div class="flex gap-1" id="filter-tabs">
+                    <button onclick="setFilter(null)" class="filter-tab active px-3 py-1 text-xs rounded bg-gray-800 text-gray-300 hover:bg-gray-700 transition">All</button>
+                    <button onclick="setFilter('PENDING')" class="filter-tab px-3 py-1 text-xs rounded text-gray-500 hover:bg-gray-800 transition">Pending</button>
+                    <button onclick="setFilter('RUNNING')" class="filter-tab px-3 py-1 text-xs rounded text-gray-500 hover:bg-gray-800 transition">Running</button>
+                    <button onclick="setFilter('COMPLETED')" class="filter-tab px-3 py-1 text-xs rounded text-gray-500 hover:bg-gray-800 transition">Completed</button>
+                    <button onclick="setFilter('FAILED')" class="filter-tab px-3 py-1 text-xs rounded text-gray-500 hover:bg-gray-800 transition">Failed</button>
+                </div>
+                <button onclick="deleteAllTasks()" class="px-3 py-1 text-xs rounded bg-red-600/80 hover:bg-red-500 text-white transition">Delete All</button>
             </div>
         </div>
         <div class="bg-gray-900 rounded-lg border border-gray-800 overflow-hidden">
@@ -125,6 +128,7 @@
                         <th class="px-4 py-2.5 text-center">Priority</th>
                         <th class="px-4 py-2.5 text-center">State</th>
                         <th class="px-4 py-2.5 text-right">Duration</th>
+                        <th class="px-4 py-2.5 text-left" style="min-width:160px">Progress</th>
                         <th class="px-4 py-2.5 text-right">Actions</th>
                     </tr>
                 </thead>
@@ -400,13 +404,26 @@ function formatDuration(d) {
     return `${Math.floor(d/3600)}h ${Math.floor((d%3600)/60)}m`;
 }
 
+function progressCell(t) {
+    if (t.state !== 'RUNNING') return '<span class="text-gray-600">--</span>';
+    if (t.progress == null) return '<span class="text-gray-500 italic">unsupported</span>';
+    const pct = Math.round(t.progress * 100);
+    const eta = t.eta != null ? formatDuration(t.eta) : '--';
+    return `<div class="flex items-center gap-2">
+        <div class="flex-1 h-1.5 bg-gray-700 rounded-full overflow-hidden">
+            <div class="h-full bg-blue-500 rounded-full" style="width:${pct}%"></div>
+        </div>
+        <span class="text-gray-400 whitespace-nowrap">${pct}% ETA ${eta}</span>
+    </div>`;
+}
+
 async function refreshTasks() {
     try {
         const qs = currentFilter ? `?state=${currentFilter}` : '';
         const { tasks } = await apiFetch('/tasks/status' + qs);
         const tbody = document.getElementById('task-tbody');
         if (!tasks.length) {
-            tbody.innerHTML = `<tr><td colspan="8" class="px-4 py-8 text-center text-gray-500">No tasks${currentFilter ? ' with state ' + currentFilter : ''}</td></tr>`;
+            tbody.innerHTML = `<tr><td colspan="9" class="px-4 py-8 text-center text-gray-500">No tasks${currentFilter ? ' with state ' + currentFilter : ''}</td></tr>`;
             return;
         }
         tbody.innerHTML = tasks.map(t => `
@@ -418,10 +435,12 @@ async function refreshTasks() {
                 <td class="px-4 py-2.5 text-center text-xs">${t.priority}</td>
                 <td class="px-4 py-2.5 text-center">${stateBadge(t.state)}</td>
                 <td class="px-4 py-2.5 text-right text-xs text-gray-400">${formatDuration(t.duration)}</td>
+                <td class="px-4 py-2.5 text-xs">${progressCell(t)}</td>
                 <td class="px-4 py-2.5 text-right">
                     ${t.state === 'RUNNING' ? `<button onclick="viewLog('${t.id}', '${escapeAttr(t.command)}', null, null)" class="bg-gray-700 hover:bg-gray-600 text-gray-300 px-2.5 py-1 rounded text-xs transition mr-1">Log</button>` : ''}
                     ${t.state === 'RUNNING' || t.state === 'PENDING' ? `<button onclick="abortTask('${t.id}')" class="bg-red-600/80 hover:bg-red-500 text-white px-2.5 py-1 rounded text-xs transition">Abort</button>` : ''}
-                    ${t.state === 'COMPLETED' || t.state === 'FAILED' ? `<button onclick="viewLog('${t.id}', '${escapeAttr(t.command)}', ${t.exit_code}, ${t.duration})" class="bg-gray-700 hover:bg-gray-600 text-gray-300 px-2.5 py-1 rounded text-xs transition">Log</button>` : ''}
+                    ${t.state === 'COMPLETED' || t.state === 'FAILED' ? `<button onclick="viewLog('${t.id}', '${escapeAttr(t.command)}', ${t.exit_code}, ${t.duration})" class="bg-gray-700 hover:bg-gray-600 text-gray-300 px-2.5 py-1 rounded text-xs transition mr-1">Log</button>` : ''}
+                    ${t.state === 'COMPLETED' || t.state === 'FAILED' ? `<button onclick="deleteTask('${t.id}')" class="bg-red-600/80 hover:bg-red-500 text-white px-2.5 py-1 rounded text-xs transition">Delete</button>` : ''}
                 </td>
             </tr>
         `).join('');
@@ -499,6 +518,30 @@ async function abortTask(task_id) {
         const qs = user ? `?username=${encodeURIComponent(user)}` : '';
         await apiFetch(`/tasks/${task_id}/abort` + qs, { method: 'POST' });
         showToast(`Task ${task_id} aborted`, 'info');
+        refreshTasks();
+    } catch (err) {
+        showToast(err.message, 'error');
+    }
+}
+
+async function deleteTask(task_id) {
+    if (!confirm(`Delete task ${task_id}? This removes the log file.`)) return;
+    try {
+        await apiFetch(`/tasks/${task_id}`, { method: 'DELETE' });
+        showToast(`Task ${task_id} deleted`, 'info');
+        refreshTasks();
+    } catch (err) {
+        showToast(err.message, 'error');
+    }
+}
+
+async function deleteAllTasks() {
+    if (!confirm('Delete all completed and failed tasks? This removes their log files.')) return;
+    try {
+        const user = getSelectedUser();
+        const qs = user ? `?username=${encodeURIComponent(user)}` : '';
+        const { deleted } = await apiFetch('/tasks' + qs, { method: 'DELETE' });
+        showToast(`Deleted ${deleted} task(s)`, 'info');
         refreshTasks();
     } catch (err) {
         showToast(err.message, 'error');

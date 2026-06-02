@@ -15,6 +15,8 @@ from hardware import GpuManager
 from models import (
     DB_PATH,
     TaskSubmit,
+    delete_all_tasks,
+    delete_task,
     get_task_by_id,
     init_db,
     row_to_status,
@@ -197,6 +199,11 @@ async def submit_task(body: TaskSubmit):
 @app.get("/tasks/status", response_model=TaskListResponse)
 async def get_task_status(state: str | None = None, username: str | None = None):
     tasks = await scheduler.get_tasks(state=state, username=username)
+    for t in tasks:
+        if t.state == "RUNNING":
+            fraction, eta_seconds = scheduler.get_progress(t.id)
+            t.progress = fraction
+            t.eta = eta_seconds
     return TaskListResponse(tasks=[t.model_dump() for t in tasks])
 
 
@@ -211,6 +218,25 @@ async def abort_task(task_id: str, username: str | None = None):
         raise HTTPException(status_code=403, detail=f"Task belongs to user '{row['username']}', not '{username}'")
     success = await scheduler.abort_task(task_id)
     return AbortResponse(success=success, task_id=task_id)
+
+
+@app.delete("/tasks")
+async def delete_all_tasks_endpoint(username: str | None = None):
+    count = await delete_all_tasks(db, username)
+    return {"deleted": count}
+
+
+@app.delete("/tasks/{task_id}")
+async def delete_task_endpoint(task_id: str):
+    row = await get_task_by_id(db, task_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
+    if row["state"] in ("RUNNING", "PENDING"):
+        raise HTTPException(status_code=400, detail=f"Cannot delete task in state {row['state']}")
+    deleted = await delete_task(db, task_id)
+    if not deleted:
+        raise HTTPException(status_code=500, detail="Failed to delete task")
+    return {"success": True, "task_id": task_id}
 
 
 @app.get("/gpus", response_model=GpuListResponse)

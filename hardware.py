@@ -18,10 +18,25 @@ class GpuManager:
         for gid in managed_gpu_ids:
             if gid >= device_count:
                 raise ValueError(f"GPU {gid} not found (system has {device_count} GPUs)")
+        # Build PCI Bus-Id map and sort by Bus-Id to match nvidia-smi order
+        self.bus_id_map: dict[int, str] = {}
+        nvml_bus_int: dict[int, int] = {}  # NVML index → bus number as int
+        for gid in managed_gpu_ids:
+            handle = pynvml.nvmlDeviceGetHandleByIndex(gid)
+            pci = pynvml.nvmlDeviceGetPciInfo(handle)
+            bus_id = pci.busId if isinstance(pci.busId, str) else pci.busId.decode()
+            self.bus_id_map[gid] = bus_id
+            # Extract bus number from "00000000:47:00.0" → 0x47
+            bus_hex = bus_id.split(":")[1]
+            nvml_bus_int[gid] = int(bus_hex, 16)
+        managed_gpu_ids = sorted(managed_gpu_ids, key=lambda gid: nvml_bus_int[gid])
         self.managed_gpu_ids = managed_gpu_ids
+
         # task_id -> gpu_id mapping for active jobs
         self.active_tasks: dict[str, int] = {}
-        logger.info("GpuManager initialized: managing GPUs %s", self.managed_gpu_ids)
+        logger.info("GpuManager initialized: managing GPUs %s (bus IDs: %s)",
+                     self.managed_gpu_ids,
+                     [self.bus_id_map[gid] for gid in self.managed_gpu_ids])
 
     def get_gpu_status(self, gpu_id: int) -> GpuStatus:
         handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_id)

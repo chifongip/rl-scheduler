@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import time
 import uuid
 
@@ -100,6 +101,8 @@ class TaskStatus(BaseModel):
     started_at: float | None
     finished_at: float | None
     duration: float | None
+    progress: float | None = None
+    eta: float | None = None
 
 
 class GpuStatus(BaseModel):
@@ -167,6 +170,54 @@ async def set_task_aborted(db: aiosqlite.Connection, task_id: str) -> bool:
     cursor = await db.execute(SET_ABORTED_SQL, (time.time(), task_id))
     await db.commit()
     return cursor.rowcount > 0
+
+
+async def delete_task(db: aiosqlite.Connection, task_id: str) -> bool:
+    row = await get_task_by_id(db, task_id)
+    if row is None:
+        return False
+    cursor = await db.execute(
+        "DELETE FROM tasks WHERE id = ? AND state NOT IN ('RUNNING', 'PENDING')",
+        (task_id,),
+    )
+    await db.commit()
+    if cursor.rowcount > 0:
+        log_path = row.get("log_path")
+        if log_path and os.path.isfile(log_path):
+            try:
+                os.remove(log_path)
+            except OSError:
+                pass
+        return True
+    return False
+
+
+async def delete_all_tasks(db: aiosqlite.Connection, username: str | None = None) -> int:
+    if username:
+        cursor = await db.execute(
+            "SELECT log_path FROM tasks WHERE state IN ('COMPLETED', 'FAILED') AND username = ?",
+            (username,),
+        )
+    else:
+        cursor = await db.execute(
+            "SELECT log_path FROM tasks WHERE state IN ('COMPLETED', 'FAILED')"
+        )
+    rows = await cursor.fetchall()
+    if username:
+        cursor = await db.execute(
+            "DELETE FROM tasks WHERE state IN ('COMPLETED', 'FAILED') AND username = ?",
+            (username,),
+        )
+    else:
+        cursor = await db.execute("DELETE FROM tasks WHERE state IN ('COMPLETED', 'FAILED')")
+    await db.commit()
+    for (log_path,) in rows:
+        if log_path and os.path.isfile(log_path):
+            try:
+                os.remove(log_path)
+            except OSError:
+                pass
+    return cursor.rowcount
 
 
 async def get_task_by_id(db: aiosqlite.Connection, task_id: str) -> dict | None:

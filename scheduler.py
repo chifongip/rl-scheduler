@@ -59,12 +59,46 @@ def _wrap_command(command: str, conda_env: str | None, username: str | None = No
         if python_path:
             command = re.sub(r'\bpython3?\b', shlex.quote(python_path), command)
     if gpu_id is not None:
-        command = f"export CUDA_VISIBLE_DEVICES={gpu_id} && {command}"
+        command = f"export CUDA_DEVICE_ORDER=PCI_BUS_ID && export CUDA_VISIBLE_DEVICES={gpu_id} && {command}"
     if work_dir:
         command = f"cd {shlex.quote(work_dir)} && {command}"
     if username is not None:
         return f"sudo -u {shlex.quote(username)} bash -l -c {shlex.quote(command)}"
     return command
+
+
+def _parse_log_progress(log_path: str) -> tuple[float | None, float | None]:
+    """Parse the tail of a training log for rsl_rl progress/ETA patterns.
+
+    Returns (fraction, eta_seconds) or (None, None) if no rsl_rl output found.
+    """
+    try:
+        with open(log_path, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(max(0, size - 4096))
+            tail = f.read().decode("utf-8", errors="replace")
+    except (OSError, ValueError):
+        return None, None
+
+    fraction = None
+    eta_seconds = None
+
+    for line in reversed(tail.splitlines()):
+        if eta_seconds is None:
+            m = re.search(r"ETA:\s+(\d+):(\d+):(\d+)", line)
+            if m:
+                eta_seconds = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
+        if fraction is None:
+            m = re.search(r"Learning iteration\s+(\d+)/(\d+)", line)
+            if m:
+                it, total = int(m.group(1)), int(m.group(2))
+                if total > 0:
+                    fraction = it / total
+        if fraction is not None and eta_seconds is not None:
+            break
+
+    return fraction, eta_seconds
 
 
 class Scheduler:
@@ -79,8 +113,10 @@ class Scheduler:
         self.poll_interval = poll_interval
         self._running = False
         self._loop_task: asyncio.Task | None = None
-        # task_id -> (asyncio.Process, file_handle)
-        self._processes: dict[str, tuple[asyncio.subprocess.Process, object]] = {}
+        # task_id -> (asyncio.Process, file_handle, log_path)
+        self._processes: dict[str, tuple[asyncio.subprocess.Process, object, str]] = {}
+        # task_id -> (fraction, eta_seconds)
+        self._progress: dict[str, tuple[float | None, float | None]] = {}
         os.makedirs(LOGS_DIR, exist_ok=True)
 
     async def start(self) -> None:
@@ -98,6 +134,7 @@ class Scheduler:
                 pass
         for task_id in list(self._processes):
             await self._kill_process(task_id)
+        self._progress.clear()
         logger.info("Scheduler stopped")
 
     async def _run_loop(self) -> None:
@@ -151,11 +188,11 @@ class Scheduler:
     ) -> None:
         env = os.environ.copy()
 
-        wrapped = _wrap_command(command, conda_env, username, gpu_id, work_dir, env_type)
         timestamp = int(time.time())
         log_path = os.path.join(LOGS_DIR, f"{task_id}_{timestamp}.log")
         log_fh = open(log_path, "w")
         try:
+            wrapped = _wrap_command(command, conda_env, username, gpu_id, work_dir, env_type)
             process = await asyncio.create_subprocess_shell(
                 wrapped,
                 env=env,
@@ -169,7 +206,7 @@ class Scheduler:
             await set_task_aborted(self.db, task_id)
             return
 
-        self._processes[task_id] = (process, log_fh)
+        self._processes[task_id] = (process, log_fh, log_path)
         self.gpu_manager.register_task(task_id, gpu_id)
         updated = await set_task_running(self.db, task_id, gpu_id, process.pid, log_path)
         if not updated:
@@ -184,18 +221,22 @@ class Scheduler:
 
     async def _check_running_tasks(self) -> None:
         for task_id in list(self._processes):
-            process, log_fh = self._processes[task_id]
+            process, _, log_path = self._processes[task_id]
             if process.returncode is not None:
                 await self._finalize_task(task_id, process.returncode)
+            else:
+                # Parse log tail for progress/ETA (rsl_rl format)
+                self._progress[task_id] = await asyncio.to_thread(_parse_log_progress, log_path)
 
     async def _finalize_task(self, task_id: str, exit_code: int) -> None:
         updated = await set_task_finished(self.db, task_id, exit_code)
         if not updated:
             logger.info("Task %s was already finalized (likely aborted)", task_id)
             return
-        process, log_fh = self._processes.pop(task_id, (None, None))
+        process, log_fh, _ = self._processes.pop(task_id, (None, None, None))
         if process is not None:
             log_fh.close()
+        self._progress.pop(task_id, None)
         self.gpu_manager.unregister_task(task_id)
         status = "COMPLETED" if exit_code == 0 else "FAILED"
         logger.info("Task %s %s (exit_code=%d)", task_id, status, exit_code)
@@ -203,7 +244,7 @@ class Scheduler:
     async def _kill_process(self, task_id: str) -> None:
         if task_id not in self._processes:
             return
-        process, log_fh = self._processes.pop(task_id)
+        process, log_fh, _ = self._processes.pop(task_id)
         try:
             pgid = os.getpgid(process.pid)
             os.killpg(pgid, signal.SIGKILL)
@@ -212,6 +253,7 @@ class Scheduler:
             pass
         log_fh.close()
         self.gpu_manager.unregister_task(task_id)
+        self._progress.pop(task_id, None)
 
     async def submit_task(
         self, username: str, command: str, work_dir: str, priority: int = 0,
@@ -247,3 +289,6 @@ class Scheduler:
     async def get_tasks(self, state: str | None = None, username: str | None = None) -> list[TaskStatus]:
         rows = await get_tasks(self.db, state, username)
         return [row_to_status(r) for r in rows]
+
+    def get_progress(self, task_id: str) -> tuple[float | None, float | None]:
+        return self._progress.get(task_id, (None, None))
