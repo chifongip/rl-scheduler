@@ -15,6 +15,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     command           TEXT NOT NULL,
     work_dir          TEXT NOT NULL,
     conda_env         TEXT,
+    env_type          TEXT,
     preferred_gpu_id  INTEGER,
     priority          INTEGER NOT NULL DEFAULT 0,
     state             TEXT NOT NULL DEFAULT 'PENDING',
@@ -34,8 +35,8 @@ WHERE state = 'RUNNING';
 """
 
 INSERT_SQL = """
-INSERT INTO tasks (id, username, command, work_dir, conda_env, preferred_gpu_id, priority, state, created_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, 'PENDING', ?);
+INSERT INTO tasks (id, username, command, work_dir, conda_env, env_type, preferred_gpu_id, priority, state, created_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?);
 """
 
 SELECT_ALL_SQL = "SELECT * FROM tasks ORDER BY created_at DESC;"
@@ -76,6 +77,7 @@ class TaskSubmit(BaseModel):
     command: str = Field(..., min_length=1)
     work_dir: str = "."
     conda_env: str | None = None
+    env_type: str | None = None
     preferred_gpu_id: int | None = None
     priority: int = 0
 
@@ -86,6 +88,7 @@ class TaskStatus(BaseModel):
     command: str
     work_dir: str
     conda_env: str | None
+    env_type: str | None
     preferred_gpu_id: int | None
     priority: int
     state: str
@@ -114,6 +117,11 @@ class GpuStatus(BaseModel):
 async def init_db(db_path: str = DB_PATH) -> aiosqlite.Connection:
     db = await aiosqlite.connect(db_path)
     await db.execute(CREATE_TABLE_SQL)
+    # Migrate: add env_type column if missing (for existing databases)
+    cursor = await db.execute("PRAGMA table_info(tasks)")
+    columns = {row[1] for row in await cursor.fetchall()}
+    if "env_type" not in columns:
+        await db.execute("ALTER TABLE tasks ADD COLUMN env_type TEXT")
     # Recover tasks that were RUNNING when the scheduler last crashed
     cursor = await db.execute(RECOVER_STUCK_SQL)
     if cursor.rowcount > 0:
@@ -129,7 +137,7 @@ async def insert_task(db: aiosqlite.Connection, submit: TaskSubmit) -> str:
     task_id = uuid.uuid4().hex[:12]
     await db.execute(
         INSERT_SQL,
-        (task_id, submit.username, submit.command, submit.work_dir, submit.conda_env, submit.preferred_gpu_id, submit.priority, time.time()),
+        (task_id, submit.username, submit.command, submit.work_dir, submit.conda_env, submit.env_type, submit.preferred_gpu_id, submit.priority, time.time()),
     )
     await db.commit()
     return task_id
@@ -196,6 +204,7 @@ def row_to_status(row: dict) -> TaskStatus:
         command=row["command"],
         work_dir=row["work_dir"],
         conda_env=row["conda_env"],
+        env_type=row["env_type"],
         preferred_gpu_id=row["preferred_gpu_id"],
         priority=row["priority"],
         state=row["state"],

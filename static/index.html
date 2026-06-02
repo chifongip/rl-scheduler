@@ -75,7 +75,7 @@
                         class="hidden w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm font-mono focus:outline-none focus:border-blue-500 mt-1">
                 </div>
                 <div>
-                    <label class="block text-xs text-gray-400 mb-1">Conda Environment</label>
+                    <label class="block text-xs text-gray-400 mb-1">Python Environment</label>
                     <select id="f-conda"
                         class="w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm focus:outline-none focus:border-blue-500">
                         <option value="">None</option>
@@ -292,6 +292,7 @@ function onUserChange(username) {
     if (username) {
         loadWorkdirs(username);
         loadCondaEnvs(username);
+        loadVenvs('/home/' + username, username);
     }
 }
 
@@ -317,6 +318,11 @@ document.getElementById('f-workdir').addEventListener('change', function() {
         custom.focus();
     } else {
         custom.classList.add('hidden');
+        const user = getSelectedUser();
+        if (user && this.value) {
+            const workdir = this.value === '.' ? '/home/' + user : this.value;
+            loadVenvs(workdir, user);
+        }
     }
 });
 
@@ -332,16 +338,48 @@ async function loadGpus() {
     }
 }
 
-// --- Conda envs ---
+// --- Python envs (conda + venv) ---
+let currentCondaEnvs = [];
+let currentVenvs = [];
+
+function rebuildEnvDropdown() {
+    const sel = document.getElementById('f-conda');
+    let html = '<option value="">None</option>';
+    if (currentVenvs.length) {
+        html += '<optgroup label="venv">';
+        html += currentVenvs.map(v => `<option value="venv:${v.path}">${v.name}</option>`).join('');
+        html += '</optgroup>';
+    }
+    if (currentCondaEnvs.length) {
+        html += '<optgroup label="conda">';
+        html += currentCondaEnvs.map(e => `<option value="${e}">${e}</option>`).join('');
+        html += '</optgroup>';
+    }
+    sel.innerHTML = html;
+}
+
 async function loadCondaEnvs(username) {
     if (!username) return;
     try {
         const { environments } = await apiFetch('/conda/envs/' + encodeURIComponent(username));
-        const sel = document.getElementById('f-conda');
-        sel.innerHTML = '<option value="">None</option>' + environments.map(e => `<option value="${e}">${e}</option>`).join('');
+        currentCondaEnvs = environments;
     } catch (e) {
+        currentCondaEnvs = [];
         showToast('Failed to load conda envs: ' + e.message, 'error');
     }
+    rebuildEnvDropdown();
+}
+
+async function loadVenvs(workdir, username) {
+    if (!workdir || !username) return;
+    try {
+        const qs = '?path=' + encodeURIComponent(workdir) + '&username=' + encodeURIComponent(username);
+        const { venvs } = await apiFetch('/envs/scan-venvs' + qs);
+        currentVenvs = venvs;
+    } catch {
+        currentVenvs = [];
+    }
+    rebuildEnvDropdown();
 }
 
 // --- Task list ---
@@ -422,11 +460,24 @@ async function handleSubmit(e) {
     const workdirCustom = document.getElementById('f-workdir-custom').value.trim();
     const workDir = workdirSel === '__custom__' ? (workdirCustom || '.') : workdirSel;
     const gpuVal = document.getElementById('f-gpu').value;
+    const envVal = document.getElementById('f-conda').value;
+    let conda_env = null;
+    let env_type = null;
+    if (envVal) {
+        if (envVal.startsWith('venv:')) {
+            conda_env = envVal.slice(5);
+            env_type = 'venv';
+        } else {
+            conda_env = envVal;
+            env_type = 'conda';
+        }
+    }
     const body = {
         username: user,
         command: document.getElementById('f-command').value.trim(),
         work_dir: workDir,
-        conda_env: document.getElementById('f-conda').value || null,
+        conda_env: conda_env,
+        env_type: env_type,
         preferred_gpu_id: gpuVal !== '' ? parseInt(gpuVal) : null,
         priority: parseInt(document.getElementById('f-priority').value) || 0,
     };
@@ -570,6 +621,8 @@ function confirmBrowseSelection() {
     sel.classList.remove('hidden');
     document.getElementById('f-workdir-custom').classList.add('hidden');
     closeBrowseModal();
+    const user = getSelectedUser();
+    if (user) loadVenvs(browseSelected, user);
 }
 
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeBrowseModal(); });

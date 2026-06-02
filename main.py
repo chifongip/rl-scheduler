@@ -83,6 +83,15 @@ class CondaEnvListResponse(BaseModel):
     environments: list[str]
 
 
+class VenvInfo(BaseModel):
+    name: str
+    path: str
+
+
+class VenvScanResponse(BaseModel):
+    venvs: list[VenvInfo]
+
+
 class HealthResponse(BaseModel):
     status: str
     gpus_managed: int
@@ -142,17 +151,36 @@ async def submit_task(body: TaskSubmit):
                 detail=f"Invalid GPU ID {body.preferred_gpu_id}. Managed GPUs: {gpu_manager.managed_gpu_ids}",
             )
 
-    # Validate conda_env if provided — scan user's filesystem for conda installations
+    # Validate env_type
+    if body.env_type is not None and body.env_type not in ("conda", "venv"):
+        raise HTTPException(status_code=400, detail=f"Invalid env_type: {body.env_type}. Must be 'conda' or 'venv'.")
+
+    # Validate conda_env if provided
     if body.conda_env is not None:
-        user_home = f"/home/{body.username}"
-        if not os.path.isdir(user_home):
-            raise HTTPException(status_code=400, detail=f"User home not found: {user_home}")
-        env_names = _scan_user_conda_envs(body.username)
-        if body.conda_env not in env_names:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Conda environment '{body.conda_env}' not found for user '{body.username}'. Available: {sorted(env_names)}",
-            )
+        if body.env_type == "venv":
+            # For venv, conda_env holds the full path to the venv directory
+            user_home = f"/home/{body.username}"
+            real_home = os.path.realpath(user_home)
+            real_env = os.path.realpath(body.conda_env)
+            if not real_env.startswith(real_home + os.sep) and real_env != real_home:
+                raise HTTPException(status_code=403, detail="venv must be within user's home directory")
+            python_path = os.path.join(body.conda_env, "bin", "python")
+            if not os.path.isfile(python_path):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"venv not found or missing bin/python: {body.conda_env}",
+                )
+        else:
+            # For conda (or unset), scan user's filesystem for conda installations
+            user_home = f"/home/{body.username}"
+            if not os.path.isdir(user_home):
+                raise HTTPException(status_code=400, detail=f"User home not found: {user_home}")
+            env_names = _scan_user_conda_envs(body.username)
+            if body.conda_env not in env_names:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Conda environment '{body.conda_env}' not found for user '{body.username}'. Available: {sorted(env_names)}",
+                )
 
     task_id = await scheduler.submit_task(
         username=body.username,
@@ -160,6 +188,7 @@ async def submit_task(body: TaskSubmit):
         work_dir=body.work_dir,
         priority=body.priority,
         conda_env=body.conda_env,
+        env_type=body.env_type,
         preferred_gpu_id=body.preferred_gpu_id,
     )
     return SubmitResponse(task_id=task_id, state="PENDING")
@@ -215,6 +244,29 @@ async def list_conda_envs(username: str):
         raise HTTPException(status_code=404, detail=f"User home directory not found: {user_home}")
     envs = _scan_user_conda_envs(username)
     return CondaEnvListResponse(environments=sorted(envs))
+
+
+@app.get("/envs/scan-venvs", response_model=VenvScanResponse)
+async def scan_venvs(path: str, username: str):
+    """Scan a directory for Python venvs (directories containing pyvenv.cfg)."""
+    user_home = f"/home/{username}"
+    real_home = os.path.realpath(user_home)
+    real_path = os.path.realpath(path)
+    if not real_path.startswith(real_home + os.sep) and real_path != real_home:
+        raise HTTPException(status_code=403, detail="Path must be within user's home directory")
+    if not os.path.isdir(path):
+        raise HTTPException(status_code=404, detail=f"Directory not found: {path}")
+    venvs = []
+    try:
+        for entry in os.listdir(real_path):
+            full = os.path.join(real_path, entry)
+            if os.path.isdir(full) and os.path.isfile(os.path.join(full, "pyvenv.cfg")):
+                python_path = os.path.join(full, "bin", "python")
+                if os.path.isfile(python_path):
+                    venvs.append(VenvInfo(name=entry, path=full))
+    except PermissionError:
+        pass
+    return VenvScanResponse(venvs=sorted(venvs, key=lambda v: v.name))
 
 
 @app.get("/health", response_model=HealthResponse)

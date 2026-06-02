@@ -37,9 +37,25 @@ def _find_conda_python(username: str, conda_env: str) -> str | None:
     return None
 
 
-def _wrap_command(command: str, conda_env: str | None, username: str | None = None, gpu_id: int | None = None, work_dir: str | None = None) -> str:
+def _find_python(username: str | None, env_name: str | None, env_type: str | None) -> str | None:
+    if env_name is None or username is None:
+        return None
+    if env_type == "venv":
+        # env_name is the full path to the venv directory — must be under user's home
+        user_home = f"/home/{username}"
+        real_home = os.path.realpath(user_home)
+        real_env = os.path.realpath(env_name)
+        if not real_env.startswith(real_home + os.sep) and real_env != real_home:
+            return None
+        python_path = os.path.join(env_name, "bin", "python")
+        return python_path if os.path.isfile(python_path) else None
+    # Default: conda resolution
+    return _find_conda_python(username, env_name)
+
+
+def _wrap_command(command: str, conda_env: str | None, username: str | None = None, gpu_id: int | None = None, work_dir: str | None = None, env_type: str | None = None) -> str:
     if conda_env is not None and username is not None:
-        python_path = _find_conda_python(username, conda_env)
+        python_path = _find_python(username, conda_env, env_type)
         if python_path:
             command = re.sub(r'\bpython3?\b', shlex.quote(python_path), command)
     if gpu_id is not None:
@@ -119,8 +135,9 @@ class Scheduler:
             command = row["command"]
             work_dir = row["work_dir"]
             conda_env = row["conda_env"]
+            env_type = row["env_type"]
             username = row["username"]
-            await self._spawn_task(task_id, command, work_dir, gpu_id, conda_env, username)
+            await self._spawn_task(task_id, command, work_dir, gpu_id, conda_env, env_type, username)
 
     async def _spawn_task(
         self,
@@ -129,11 +146,12 @@ class Scheduler:
         work_dir: str,
         gpu_id: int,
         conda_env: str | None = None,
+        env_type: str | None = None,
         username: str | None = None,
     ) -> None:
         env = os.environ.copy()
 
-        wrapped = _wrap_command(command, conda_env, username, gpu_id, work_dir)
+        wrapped = _wrap_command(command, conda_env, username, gpu_id, work_dir, env_type)
         timestamp = int(time.time())
         log_path = os.path.join(LOGS_DIR, f"{task_id}_{timestamp}.log")
         log_fh = open(log_path, "w")
@@ -160,8 +178,8 @@ class Scheduler:
             logger.info("Task %s was aborted before dispatch completed — cleaned up", task_id)
             return
         logger.info(
-            "Task %s dispatched → GPU %d (pid=%d, conda=%s, log=%s)",
-            task_id, gpu_id, process.pid, conda_env or "none", log_path,
+            "Task %s dispatched → GPU %d (pid=%d, env=%s/%s, log=%s)",
+            task_id, gpu_id, process.pid, env_type or "none", conda_env or "none", log_path,
         )
 
     async def _check_running_tasks(self) -> None:
@@ -197,17 +215,18 @@ class Scheduler:
 
     async def submit_task(
         self, username: str, command: str, work_dir: str, priority: int = 0,
-        conda_env: str | None = None, preferred_gpu_id: int | None = None,
+        conda_env: str | None = None, env_type: str | None = None,
+        preferred_gpu_id: int | None = None,
     ) -> str:
         from models import insert_task, TaskSubmit
         submit = TaskSubmit(
             username=username, command=command, work_dir=work_dir, priority=priority,
-            conda_env=conda_env, preferred_gpu_id=preferred_gpu_id,
+            conda_env=conda_env, env_type=env_type, preferred_gpu_id=preferred_gpu_id,
         )
         task_id = await insert_task(self.db, submit)
         logger.info(
-            "Task submitted: %s (user=%s, cmd=%r, conda=%s, gpu=%s, priority=%d)",
-            task_id, username, command, conda_env, preferred_gpu_id, priority,
+            "Task submitted: %s (user=%s, cmd=%r, env=%s/%s, gpu=%s, priority=%d)",
+            task_id, username, command, env_type, conda_env, preferred_gpu_id, priority,
         )
         return task_id
 
