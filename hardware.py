@@ -62,6 +62,7 @@ class GpuManager:
             if gid == gpu_id:
                 active_task_id = tid
                 break
+        external_count = self._count_external_compute_procs(gpu_id)
         return GpuStatus(
             gpu_id=gpu_id,
             name=name,
@@ -70,6 +71,7 @@ class GpuManager:
             memory_total_mb=mem_total_mb,
             memory_utilization_pct=mem_pct,
             active_task_id=active_task_id,
+            external_process_count=external_count,
         )
 
     def get_all_gpu_status(self) -> list[GpuStatus]:
@@ -81,36 +83,36 @@ class GpuManager:
                 logger.warning("NVML error reading GPU %d: %s", gid, e)
         return statuses
 
-    def is_gpu_available(self, gpu_id: int) -> bool:
-        if gpu_id not in self.managed_gpu_ids:
-            return False
-        if gpu_id in self.active_tasks.values():
-            logger.debug("GPU %d unavailable: has scheduler-managed task", gpu_id)
-            return False
+    def _count_external_compute_procs(self, gpu_id: int) -> int:
+        """Count non-MPS compute processes on a GPU (processes not managed by this scheduler)."""
         try:
             handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_id)
             compute_procs = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
-            # Filter out MPS server (system daemon, not a training job)
-            non_mps = []
+            count = 0
             for p in compute_procs:
                 try:
                     name = pynvml.nvmlSystemGetProcessName(p.pid)
                     if isinstance(name, bytes):
                         name = name.decode()
                     if "mps" not in name.lower():
-                        non_mps.append(p)
+                        count += 1
                 except pynvml.NVMLError:
-                    non_mps.append(p)  # can't identify, assume it's real
-            if non_mps:
-                logger.info(
-                    "GPU %d unavailable: %d compute process(es) running",
-                    gpu_id, len(non_mps),
-                )
-                return False
-            return True
-        except pynvml.NVMLError as e:
-            logger.warning("NVML error checking GPU %d: %s", gpu_id, e)
+                    count += 1  # can't identify, assume it's real
+            return count
+        except pynvml.NVMLError:
+            return 0
+
+    def is_gpu_available(self, gpu_id: int) -> bool:
+        if gpu_id not in self.managed_gpu_ids:
             return False
+        if gpu_id in self.active_tasks.values():
+            logger.debug("GPU %d unavailable: has scheduler-managed task", gpu_id)
+            return False
+        ext = self._count_external_compute_procs(gpu_id)
+        if ext:
+            logger.info("GPU %d unavailable: %d compute process(es) running", gpu_id, ext)
+            return False
+        return True
 
     def find_available_gpu(self) -> int | None:
         for gid in self.managed_gpu_ids:

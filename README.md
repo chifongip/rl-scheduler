@@ -4,16 +4,20 @@ A GPU workload manager that prevents resource contention on multi-GPU machines. 
 
 ## Features
 
-- **GPU isolation** via `CUDA_VISIBLE_DEVICES` — each job sees only its assigned GPU
+- **GPU isolation** via `CUDA_VISIBLE_DEVICES` and `CUDA_DEVICE_ORDER=PCI_BUS_ID` — each job sees only its assigned GPU
 - **Priority queue** — higher-priority tasks dispatch first
 - **Multi-user aware** — per-user conda environments and working directories
-- **Conda environment support** — specify a conda env per task, python binary resolved automatically
+- **Python environment support** — conda and venv, with automatic python binary resolution
 - **Manual GPU selection** — pin a task to a specific GPU or let the scheduler auto-assign
 - **Persistent queue** — SQLite-backed task state survives server restarts
 - **Crash recovery** — orphaned tasks from a previous crash are marked `FAILED` on startup
 - **Live dashboard** — web UI with GPU monitoring, task submission, log viewing, and abort
 - **Process group management** — abort kills the entire process tree, not just the parent
 - **Live log viewing** — view stdout/stderr while a task is still running
+- **Progress tracking** — live progress bars and ETA for rsl_rl-format training logs
+- **External process detection** — GPUs show "Busy" when non-scheduler compute processes are running
+- **Task management** — delete individual or bulk-delete completed/failed tasks and their logs
+- **Task state filters** — filter task table by PENDING/RUNNING/COMPLETED/FAILED
 
 ## Screenshots
 
@@ -33,6 +37,8 @@ rl-scheduler/
 ├── start.sh          # Convenience launcher (sudo python3 main.py)
 ├── static/
 │   └── index.html    # Single-page dashboard (Tailwind CSS + vanilla JS)
+├── doc/
+│   └── dashboard.png # Dashboard screenshot
 ├── logs/             # Auto-created; per-task stdout/stderr logs
 └── scheduler.db      # SQLite database (created at runtime)
 ```
@@ -84,11 +90,14 @@ curl http://localhost:8000/gpus
 | `GET`  | `/tasks/status` | List tasks (optional `?state=` and `?username=` filters) |
 | `POST` | `/tasks/{task_id}/abort` | Force-kill a running or pending task |
 | `GET`  | `/tasks/{task_id}/log` | Get task log output (works while running) |
-| `GET`  | `/gpus` | Live GPU telemetry (temp, VRAM, active task) |
+| `DELETE` | `/tasks` | Delete all completed/failed tasks (optional `?username=` filter) |
+| `DELETE` | `/tasks/{task_id}` | Delete a single completed/failed task and its log file |
+| `GET`  | `/gpus` | Live GPU telemetry (temp, VRAM, active task, external process count) |
 | `GET`  | `/users` | List system users (uid ≥ 1000 with valid home dir) |
 | `GET`  | `/conda/envs/{username}` | List conda environments available to a user |
 | `GET`  | `/workdirs/{username}` | List top-level directories in user's home |
 | `GET`  | `/workdirs/{username}/browse` | Browse subdirectories in user's home (`?path=`) |
+| `GET`  | `/envs/scan-venvs` | Scan a directory for Python venvs (`?path=` and `?username=`) |
 | `GET`  | `/health` | System health summary |
 
 ### Submit a task
@@ -110,7 +119,8 @@ Fields:
 - `username` **(required)** — the system user to run the command as
 - `command` **(required)** — the shell command to execute
 - `work_dir` (default: `.`) — working directory for the subprocess
-- `conda_env` (default: null) — conda environment name; `python`/`python3` in the command is replaced with the env's python binary
+- `env_type` (default: null) — `"conda"` or `"venv"`; selects which resolution strategy to use with `conda_env`
+- `conda_env` (default: null) — environment name (conda) or full path (venv); `python`/`python3` in the command is replaced with the env's python binary
 - `preferred_gpu_id` (default: null) — pin to a specific GPU, or null for auto-assign
 - `priority` (default: 0) — higher values dispatch first
 
@@ -160,15 +170,21 @@ PENDING  ──dispatch──>  RUNNING  ──exit 0──>  COMPLETED
 
 ## GPU Isolation
 
-Each task gets `CUDA_VISIBLE_DEVICES=<gpu_id>` injected into its environment. This makes the assigned GPU appear as device 0 to the training script, fully isolating it from other GPUs and other tasks.
+Each task gets `CUDA_DEVICE_ORDER=PCI_BUS_ID` and `CUDA_VISIBLE_DEVICES=<gpu_id>` injected into its environment. This makes the assigned GPU appear as device 0 to the training script, fully isolating it from other GPUs and other tasks.
 
 A GPU is considered "available" when:
 1. No scheduler-managed task is currently running on it
 2. No non-MPS compute processes are running on it (detected via NVML)
 
-## Conda Support
+GPUs with external compute processes display as "Busy" (yellow) in the dashboard. GPUs managed by a scheduler task display as "Running" (blue).
 
-If `conda_env` is specified, the scheduler locates the target environment's python binary at `/home/<user>/<conda_dir>/envs/<env>/bin/python` (checking miniconda3, anaconda3, and miniforge3). It then replaces `python` or `python3` in the command with the full path to the env's python. The command runs under `bash -l` so conda-initialized shell environments are picked up.
+## Python Environment Support
+
+Set `env_type` to `"conda"` or `"venv"` and provide the environment identifier in `conda_env`.
+
+**Conda:** The scheduler locates the target environment's python binary at `/home/<user>/<conda_dir>/envs/<env>/bin/python` (checking anaconda3, miniconda3, and miniforge3). It also reads `~/.conda/environments.txt` for additional env paths. The `base` environment is always available. The command runs under `bash -l` so conda-initialized shell environments are picked up.
+
+**Venv:** `conda_env` should be the full path to the venv directory. The scheduler uses `<conda_env>/bin/python` as the python binary. The path must be within the user's home directory.
 
 ## Crash Recovery
 
