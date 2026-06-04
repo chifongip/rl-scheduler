@@ -35,11 +35,13 @@ logger = logging.getLogger("main")
 db: aiosqlite.Connection = None  # type: ignore[assignment]
 gpu_manager: GpuManager = None  # type: ignore[assignment]
 scheduler: Scheduler = None  # type: ignore[assignment]
+ADMIN_PASSWORD = ""
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global db, gpu_manager, scheduler
+    global db, gpu_manager, scheduler, ADMIN_PASSWORD
+    ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
     logger.info("Starting rl-scheduler...")
     db = await init_db(DB_PATH)
     gpu_manager = GpuManager()
@@ -138,6 +140,15 @@ def _scan_user_conda_envs(username: str) -> set[str]:
     return envs
 
 
+def _require_admin(username: str | None, admin_password: str | None):
+    if username:
+        return
+    if not ADMIN_PASSWORD:
+        raise HTTPException(status_code=403, detail="Admin mode is disabled (no ADMIN_PASSWORD set)")
+    if admin_password != ADMIN_PASSWORD:
+        raise HTTPException(status_code=403, detail="Invalid admin password")
+
+
 # --- Endpoints ---
 
 @app.post("/tasks/submit", response_model=SubmitResponse)
@@ -209,7 +220,7 @@ async def get_task_status(state: str | None = None, username: str | None = None)
 
 
 @app.post("/tasks/{task_id}/abort", response_model=AbortResponse)
-async def abort_task(task_id: str, username: str | None = None):
+async def abort_task(task_id: str, username: str | None = None, admin_password: str | None = None):
     row = await get_task_by_id(db, task_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
@@ -217,23 +228,28 @@ async def abort_task(task_id: str, username: str | None = None):
         raise HTTPException(status_code=400, detail=f"Cannot abort task in state {row['state']}")
     if username and row["username"] != username:
         raise HTTPException(status_code=403, detail=f"Task belongs to user '{row['username']}', not '{username}'")
+    _require_admin(username, admin_password)
     success = await scheduler.abort_task(task_id)
     return AbortResponse(success=success, task_id=task_id)
 
 
 @app.delete("/tasks")
-async def delete_all_tasks_endpoint(username: str | None = None):
+async def delete_all_tasks_endpoint(username: str | None = None, admin_password: str | None = None):
+    _require_admin(username, admin_password)
     count = await delete_all_tasks(db, username)
     return {"deleted": count}
 
 
 @app.delete("/tasks/{task_id}")
-async def delete_task_endpoint(task_id: str):
+async def delete_task_endpoint(task_id: str, username: str | None = None, admin_password: str | None = None):
     row = await get_task_by_id(db, task_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"Task not found: {task_id}")
     if row["state"] in ("RUNNING", "PENDING"):
         raise HTTPException(status_code=400, detail=f"Cannot delete task in state {row['state']}")
+    if username and row["username"] != username:
+        raise HTTPException(status_code=403, detail=f"Task belongs to user '{row['username']}', not '{username}'")
+    _require_admin(username, admin_password)
     deleted = await delete_task(db, task_id)
     if not deleted:
         raise HTTPException(status_code=500, detail="Failed to delete task")

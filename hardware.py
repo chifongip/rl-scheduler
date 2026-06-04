@@ -160,7 +160,7 @@ class GpuManager:
             info = {"num_fans": num_fans, "min_speed": min_speed, "max_speed": max_speed}
             self._fan_support[gpu_id] = info
             return info
-        except pynvml.NVMLError:
+        except (pynvml.NVMLError, AttributeError, OSError):
             self._fan_support[gpu_id] = None
             return None
 
@@ -194,12 +194,11 @@ class GpuManager:
         if speed < fan_info["min_speed"] or speed > fan_info["max_speed"]:
             raise ValueError(f"Fan speed {speed} out of range [{fan_info['min_speed']}, {fan_info['max_speed']}]")
         handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_id)
-        # Set manual mode first
         try:
             pynvml.nvmlDeviceSetFanControlPolicy(handle, 0, pynvml.NVML_FAN_POLICY_MANUAL)
+            pynvml.nvmlDeviceSetFanSpeed_v2(handle, 0, speed)
         except pynvml.NVMLError as e:
-            logger.warning("Could not set fan policy to manual on GPU %d: %s", gpu_id, e)
-        pynvml.nvmlDeviceSetFanSpeed_v2(handle, 0, speed)
+            raise ValueError(f"Failed to set fan speed on GPU {gpu_id}: {e}")
         logger.info("GPU %d fan speed set to %d%%", gpu_id, speed)
         return self.get_fan_status(gpu_id)
 
@@ -220,16 +219,17 @@ class GpuManager:
         return self.get_fan_status(gpu_id)
 
     def shutdown(self) -> None:
-        # Reset all GPUs to automatic fan control before shutting down
-        for gid in self.managed_gpu_ids:
-            fan_info = self._probe_fan_support(gid)
-            if fan_info is not None:
-                try:
-                    handle = pynvml.nvmlDeviceGetHandleByIndex(gid)
-                    pynvml.nvmlDeviceSetDefaultFanSpeed_v2(handle, 0)
-                    pynvml.nvmlDeviceSetFanControlPolicy(handle, 0, pynvml.NVML_FAN_POLICY_TEMPERATURE_CONTINOUS_SW)
-                    logger.info("GPU %d fan reset to automatic on shutdown", gid)
-                except pynvml.NVMLError as e:
-                    logger.warning("Could not reset fan on GPU %d during shutdown: %s", gid, e)
-        pynvml.nvmlShutdown()
-        logger.info("GpuManager shut down")
+        try:
+            for gid in self.managed_gpu_ids:
+                fan_info = self._probe_fan_support(gid)
+                if fan_info is not None:
+                    try:
+                        handle = pynvml.nvmlDeviceGetHandleByIndex(gid)
+                        pynvml.nvmlDeviceSetDefaultFanSpeed_v2(handle, 0)
+                        pynvml.nvmlDeviceSetFanControlPolicy(handle, 0, pynvml.NVML_FAN_POLICY_TEMPERATURE_CONTINOUS_SW)
+                        logger.info("GPU %d fan reset to automatic on shutdown", gid)
+                    except (pynvml.NVMLError, OSError) as e:
+                        logger.warning("Could not reset fan on GPU %d during shutdown: %s", gid, e)
+        finally:
+            pynvml.nvmlShutdown()
+            logger.info("GpuManager shut down")

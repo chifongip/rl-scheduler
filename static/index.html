@@ -133,7 +133,7 @@
                     </tr>
                 </thead>
                 <tbody id="task-tbody">
-                    <tr><td colspan="8" class="px-4 py-8 text-center text-gray-500">Loading...</td></tr>
+                    <tr><td colspan="9" class="px-4 py-8 text-center text-gray-500">Loading...</td></tr>
                 </tbody>
             </table>
         </div>
@@ -219,6 +219,7 @@ let currentFilter = null;
 let pollingInterval = null;
 let currentUser = localStorage.getItem('rl-scheduler-user') || '';
 let cachedGpus = [];
+let adminPassword = '';
 
 function getSelectedUser() {
     return document.getElementById('user-selector').value || currentUser;
@@ -247,9 +248,23 @@ function toggleForm() {
 // --- API helpers ---
 async function apiFetch(path, opts = {}) {
     const res = await fetch(API + path, { headers: { 'Content-Type': 'application/json' }, ...opts });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.detail || `HTTP ${res.status}`);
+    const text = await res.text();
+    let data;
+    try { data = JSON.parse(text); } catch { data = null; }
+    if (!res.ok) {
+        const msg = (data && data.detail) || text || `HTTP ${res.status}`;
+        if (res.status === 403 && msg.toLowerCase().includes('admin')) adminPassword = '';
+        throw new Error(msg);
+    }
     return data;
+}
+
+function getAdminPassword() {
+    if (adminPassword) return adminPassword;
+    const pw = prompt('Admin password:');
+    if (pw === null) return null;
+    adminPassword = pw;
+    return pw;
 }
 
 // --- Health & stats ---
@@ -293,7 +308,7 @@ async function refreshGpus() {
                     <span class="font-semibold text-sm">GPU ${g.gpu_id}</span>
                     <span class="text-xs ${g.active_task_id ? 'text-blue-400' : g.external_process_count > 0 ? 'text-yellow-400' : 'text-gray-500'}">${g.active_task_id ? 'Running' : g.external_process_count > 0 ? 'Busy' : 'Idle'}</span>
                 </div>
-                <div class="text-xs text-gray-400 mb-3 truncate">${g.name}</div>
+                <div class="text-xs text-gray-400 mb-3 truncate">${escapeHtml(g.name)}</div>
                 <div class="flex items-center gap-4 mb-3">
                     <div>
                         <div class="text-xs text-gray-500">Temp</div>
@@ -328,7 +343,7 @@ async function loadUsers() {
         const { users } = await apiFetch('/users');
         const sel = document.getElementById('user-selector');
         sel.innerHTML = '<option value="">Select user...</option>' +
-            users.map(u => `<option value="${u}" ${u === currentUser ? 'selected' : ''}>${u}</option>`).join('');
+            users.map(u => `<option value="${escapeHtml(u)}" ${u === currentUser ? 'selected' : ''}>${escapeHtml(u)}</option>`).join('');
         if (currentUser && users.includes(currentUser)) {
             onUserChange(currentUser);
         }
@@ -358,7 +373,7 @@ async function loadWorkdirs(username) {
         const { directories } = await apiFetch('/workdirs/' + encodeURIComponent(username));
         const sel = document.getElementById('f-workdir');
         const opts = ['<option value=".">.</option>'] +
-            directories.map(d => `<option value="${d}">${d}</option>`).join('') +
+            directories.map(d => `<option value="${escapeHtml(d)}">${escapeHtml(d)}</option>`).join('') +
             '<option value="__custom__">Custom...</option>';
         sel.innerHTML = opts;
     } catch (e) {
@@ -387,7 +402,7 @@ async function loadGpus() {
         const { gpus } = await apiFetch('/gpus');
         const sel = document.getElementById('f-gpu');
         sel.innerHTML = '<option value="">Auto</option>' +
-            gpus.map(g => `<option value="${g.gpu_id}">GPU ${g.gpu_id} — ${g.name}</option>`).join('');
+            gpus.map(g => `<option value="${g.gpu_id}">GPU ${g.gpu_id} — ${escapeHtml(g.name)}</option>`).join('');
     } catch {
         // leave "Auto" only
     }
@@ -402,12 +417,12 @@ function rebuildEnvDropdown() {
     let html = '<option value="">None</option>';
     if (currentVenvs.length) {
         html += '<optgroup label="venv">';
-        html += currentVenvs.map(v => `<option value="venv:${v.path}">${v.name}</option>`).join('');
+        html += currentVenvs.map(v => `<option value="venv:${escapeHtml(v.path)}">${escapeHtml(v.name)}</option>`).join('');
         html += '</optgroup>';
     }
     if (currentCondaEnvs.length) {
         html += '<optgroup label="conda">';
-        html += currentCondaEnvs.map(e => `<option value="${e}">${e}</option>`).join('');
+        html += currentCondaEnvs.map(e => `<option value="${escapeHtml(e)}">${escapeHtml(e)}</option>`).join('');
         html += '</optgroup>';
     }
     sel.innerHTML = html;
@@ -468,33 +483,74 @@ function progressCell(t) {
     </div>`;
 }
 
+function buildActionsCell(t) {
+    const u = escapeAttr(t.username || '');
+    return `
+        ${t.state === 'RUNNING' ? `<button onclick="viewLog('${t.id}', '${escapeAttr(t.command)}', null, null)" class="bg-gray-700 hover:bg-gray-600 text-gray-300 px-2.5 py-1 rounded text-xs transition mr-1">Log</button>` : ''}
+        ${t.state === 'RUNNING' || t.state === 'PENDING' ? `<button onclick="abortTask('${t.id}', '${u}')" class="bg-red-600/80 hover:bg-red-500 text-white px-2.5 py-1 rounded text-xs transition">Abort</button>` : ''}
+        ${t.state === 'COMPLETED' || t.state === 'FAILED' ? `<button onclick="viewLog('${t.id}', '${escapeAttr(t.command)}', ${t.exit_code}, ${t.duration})" class="bg-gray-700 hover:bg-gray-600 text-gray-300 px-2.5 py-1 rounded text-xs transition mr-1">Log</button>` : ''}
+        ${t.state === 'COMPLETED' || t.state === 'FAILED' ? `<button onclick="deleteTask('${t.id}', '${u}')" class="bg-red-600/80 hover:bg-red-500 text-white px-2.5 py-1 rounded text-xs transition">Delete</button>` : ''}`;
+}
+
+function buildTaskRow(t) {
+    return `
+        <tr data-task-id="${t.id}" data-state="${t.state}" class="border-b border-gray-800 hover:bg-gray-800/50 transition">
+            <td class="px-4 py-2.5 font-mono text-xs text-gray-400">${t.id}</td>
+            <td class="px-4 py-2.5 text-xs text-gray-300">${t.username || '--'}</td>
+            <td class="px-4 py-2.5 font-mono text-xs max-w-xs truncate cursor-pointer" title="${escapeHtml(t.command)}" onclick="toggleCommand(this)">${escapeHtml(t.command)}</td>
+            <td class="px-4 py-2.5 text-xs">${t.gpu_id != null ? 'GPU ' + t.gpu_id : '--'}</td>
+            <td class="px-4 py-2.5 text-center text-xs">${t.priority}</td>
+            <td data-cell="state" class="px-4 py-2.5 text-center">${stateBadge(t.state)}</td>
+            <td data-cell="duration" class="px-4 py-2.5 text-right text-xs text-gray-400">${formatDuration(t.duration)}</td>
+            <td data-cell="progress" class="px-4 py-2.5 text-xs">${progressCell(t)}</td>
+            <td data-cell="actions" class="px-4 py-2.5 text-right whitespace-nowrap">${buildActionsCell(t)}</td>
+        </tr>`;
+}
+
+function updateTaskRow(row, t) {
+    row.dataset.state = t.state;
+    row.querySelector('[data-cell="state"]').innerHTML = stateBadge(t.state);
+    row.querySelector('[data-cell="duration"]').textContent = formatDuration(t.duration);
+    row.querySelector('[data-cell="progress"]').innerHTML = progressCell(t);
+    row.querySelector('[data-cell="actions"]').innerHTML = buildActionsCell(t);
+}
+
 async function refreshTasks() {
     try {
         const qs = currentFilter ? `?state=${currentFilter}` : '';
         const { tasks } = await apiFetch('/tasks/status' + qs);
         const tbody = document.getElementById('task-tbody');
+
+        // Remove non-task rows (e.g. "Loading..." placeholder)
+        for (const row of tbody.querySelectorAll('tr:not([data-task-id])')) {
+            row.remove();
+        }
+
         if (!tasks.length) {
             tbody.innerHTML = `<tr><td colspan="9" class="px-4 py-8 text-center text-gray-500">No tasks${currentFilter ? ' with state ' + currentFilter : ''}</td></tr>`;
             return;
         }
-        tbody.innerHTML = tasks.map(t => `
-            <tr class="border-b border-gray-800 hover:bg-gray-800/50 transition">
-                <td class="px-4 py-2.5 font-mono text-xs text-gray-400">${t.id}</td>
-                <td class="px-4 py-2.5 text-xs text-gray-300">${t.username || '--'}</td>
-                <td class="px-4 py-2.5 font-mono text-xs max-w-xs truncate" title="${escapeHtml(t.command)}">${escapeHtml(t.command)}</td>
-                <td class="px-4 py-2.5 text-xs">${t.gpu_id != null ? 'GPU ' + t.gpu_id : '--'}</td>
-                <td class="px-4 py-2.5 text-center text-xs">${t.priority}</td>
-                <td class="px-4 py-2.5 text-center">${stateBadge(t.state)}</td>
-                <td class="px-4 py-2.5 text-right text-xs text-gray-400">${formatDuration(t.duration)}</td>
-                <td class="px-4 py-2.5 text-xs">${progressCell(t)}</td>
-                <td class="px-4 py-2.5 text-right">
-                    ${t.state === 'RUNNING' ? `<button onclick="viewLog('${t.id}', '${escapeAttr(t.command)}', null, null)" class="bg-gray-700 hover:bg-gray-600 text-gray-300 px-2.5 py-1 rounded text-xs transition mr-1">Log</button>` : ''}
-                    ${t.state === 'RUNNING' || t.state === 'PENDING' ? `<button onclick="abortTask('${t.id}')" class="bg-red-600/80 hover:bg-red-500 text-white px-2.5 py-1 rounded text-xs transition">Abort</button>` : ''}
-                    ${t.state === 'COMPLETED' || t.state === 'FAILED' ? `<button onclick="viewLog('${t.id}', '${escapeAttr(t.command)}', ${t.exit_code}, ${t.duration})" class="bg-gray-700 hover:bg-gray-600 text-gray-300 px-2.5 py-1 rounded text-xs transition mr-1">Log</button>` : ''}
-                    ${t.state === 'COMPLETED' || t.state === 'FAILED' ? `<button onclick="deleteTask('${t.id}')" class="bg-red-600/80 hover:bg-red-500 text-white px-2.5 py-1 rounded text-xs transition">Delete</button>` : ''}
-                </td>
-            </tr>
-        `).join('');
+
+        const newById = new Map(tasks.map(t => [t.id, t]));
+        const existingRows = tbody.querySelectorAll('tr[data-task-id]');
+        const existingIds = new Set();
+
+        for (const row of existingRows) {
+            const id = row.dataset.taskId;
+            existingIds.add(id);
+            const t = newById.get(id);
+            if (!t) {
+                row.remove();
+            } else {
+                updateTaskRow(row, t);
+            }
+        }
+
+        for (const t of tasks) {
+            if (!existingIds.has(t.id)) {
+                tbody.insertAdjacentHTML('beforeend', buildTaskRow(t));
+            }
+        }
     } catch (e) { console.error('Task refresh failed:', e); }
 }
 
@@ -504,6 +560,11 @@ function escapeHtml(s) {
 
 function escapeAttr(s) {
     return escapeHtml(s.replace(/\\/g, '\\\\').replace(/'/g, "\\'"));
+}
+
+function toggleCommand(el) {
+    el.classList.toggle('truncate');
+    el.classList.toggle('max-w-xs');
 }
 
 // --- Filter tabs ---
@@ -562,12 +623,24 @@ async function handleSubmit(e) {
 }
 
 // --- Abort ---
-async function abortTask(task_id) {
-    if (!confirm(`Abort task ${task_id}?`)) return;
+async function abortTask(task_id, taskUsername) {
     const user = getSelectedUser();
+    const isCrossUser = user && taskUsername && user !== taskUsername;
+    if (isCrossUser) {
+        if (!confirm(`Task ${task_id} belongs to ${taskUsername}. Abort it anyway?`)) return;
+    } else if (!confirm(`Abort task ${task_id}?`)) return;
     try {
-        const qs = user ? `?username=${encodeURIComponent(user)}` : '';
+        const params = new URLSearchParams();
+        if (isCrossUser || !user) {
+            const pw = getAdminPassword();
+            if (pw === null) return;
+            params.set('admin_password', pw);
+        } else {
+            params.set('username', user);
+        }
+        const qs = params.toString() ? '?' + params.toString() : '';
         await apiFetch(`/tasks/${task_id}/abort` + qs, { method: 'POST' });
+        adminPassword = '';
         showToast(`Task ${task_id} aborted`, 'info');
         refreshTasks();
     } catch (err) {
@@ -575,10 +648,24 @@ async function abortTask(task_id) {
     }
 }
 
-async function deleteTask(task_id) {
-    if (!confirm(`Delete task ${task_id}? This removes the log file.`)) return;
+async function deleteTask(task_id, taskUsername) {
+    const user = getSelectedUser();
+    const isCrossUser = user && taskUsername && user !== taskUsername;
+    if (isCrossUser) {
+        if (!confirm(`Task ${task_id} belongs to ${taskUsername}. Delete it anyway?`)) return;
+    } else if (!confirm(`Delete task ${task_id}? This removes the log file.`)) return;
     try {
-        await apiFetch(`/tasks/${task_id}`, { method: 'DELETE' });
+        const params = new URLSearchParams();
+        if (isCrossUser || !user) {
+            const pw = getAdminPassword();
+            if (pw === null) return;
+            params.set('admin_password', pw);
+        } else {
+            params.set('username', user);
+        }
+        const qs = params.toString() ? '?' + params.toString() : '';
+        await apiFetch(`/tasks/${task_id}` + qs, { method: 'DELETE' });
+        adminPassword = '';
         showToast(`Task ${task_id} deleted`, 'info');
         refreshTasks();
     } catch (err) {
@@ -587,11 +674,22 @@ async function deleteTask(task_id) {
 }
 
 async function deleteAllTasks() {
-    if (!confirm('Delete all completed and failed tasks? This removes their log files.')) return;
+    const user = getSelectedUser();
+    const msg = user
+        ? `Delete all completed and failed tasks for ${user}? This removes their log files.`
+        : 'Delete ALL completed and failed tasks for ALL users? This removes their log files.';
+    if (!confirm(msg)) return;
     try {
-        const user = getSelectedUser();
-        const qs = user ? `?username=${encodeURIComponent(user)}` : '';
+        const params = new URLSearchParams();
+        if (user) params.set('username', user);
+        else {
+            const pw = getAdminPassword();
+            if (pw === null) return;
+            params.set('admin_password', pw);
+        }
+        const qs = params.toString() ? '?' + params.toString() : '';
         const { deleted } = await apiFetch('/tasks' + qs, { method: 'DELETE' });
+        adminPassword = '';
         showToast(`Deleted ${deleted} task(s)`, 'info');
         refreshTasks();
     } catch (err) {
@@ -672,14 +770,14 @@ async function loadBrowseDir(path) {
             return;
         }
         list.innerHTML = directories.map(d => {
-            const name = d.split('/').pop();
-            return `<div class="flex items-center gap-2 px-3 py-2 rounded hover:bg-gray-800 cursor-pointer transition" onclick="loadBrowseDir('${d}')">
+            const name = escapeHtml(d.split('/').pop());
+            return `<div class="flex items-center gap-2 px-3 py-2 rounded hover:bg-gray-800 cursor-pointer transition" onclick="loadBrowseDir('${escapeAttr(d)}')">
                 <svg class="w-4 h-4 text-yellow-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/></svg>
                 <span class="text-sm text-gray-300 font-mono">${name}</span>
             </div>`;
         }).join('');
     } catch (e) {
-        list.innerHTML = '<div class="text-red-400 text-sm text-center py-4">' + e.message + '</div>';
+        list.innerHTML = '<div class="text-red-400 text-sm text-center py-4">' + escapeHtml(e.message) + '</div>';
     }
 }
 
@@ -687,12 +785,12 @@ function renderBreadcrumb(path) {
     const user = getSelectedUser();
     const bc = document.getElementById('browse-breadcrumb');
     const parts = path ? path.split('/') : [];
-    let html = `<span class="cursor-pointer hover:text-blue-400 ${!path ? 'text-blue-400' : ''}" onclick="loadBrowseDir('')">${user}</span>`;
+    let html = `<span class="cursor-pointer hover:text-blue-400 ${!path ? 'text-blue-400' : ''}" onclick="loadBrowseDir('')">${escapeHtml(user)}</span>`;
     let accumulated = '';
     for (const part of parts) {
         accumulated += (accumulated ? '/' : '') + part;
         const p = accumulated;
-        html += ` <span class="text-gray-600">/</span> <span class="cursor-pointer hover:text-blue-400 ${p === path ? 'text-blue-400' : ''}" onclick="loadBrowseDir('${p}')">${part}</span>`;
+        html += ` <span class="text-gray-600">/</span> <span class="cursor-pointer hover:text-blue-400 ${p === path ? 'text-blue-400' : ''}" onclick="loadBrowseDir('${escapeAttr(p)}')">${escapeHtml(part)}</span>`;
     }
     bc.innerHTML = html;
 }

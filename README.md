@@ -18,6 +18,8 @@ A GPU workload manager that prevents resource contention on multi-GPU machines. 
 - **External process detection** — GPUs show "Busy" when non-scheduler compute processes are running
 - **Task management** — delete individual or bulk-delete completed/failed tasks and their logs
 - **Task state filters** — filter task table by PENDING/RUNNING/COMPLETED/FAILED
+- **GPU fan control** — monitor fan speed/temperature, set manual fan speed or auto mode via the dashboard
+- **Admin password** — protect privileged operations (abort/delete in admin mode) with a configurable password
 
 ## Screenshots
 
@@ -88,11 +90,12 @@ curl http://localhost:8000/gpus
 |--------|------|-------------|
 | `POST` | `/tasks/submit` | Submit a new task |
 | `GET`  | `/tasks/status` | List tasks (optional `?state=` and `?username=` filters) |
-| `POST` | `/tasks/{task_id}/abort` | Force-kill a running or pending task |
+| `POST` | `/tasks/{task_id}/abort` | Force-kill a running or pending task (`?username=` and `?admin_password=`) |
 | `GET`  | `/tasks/{task_id}/log` | Get task log output (works while running) |
-| `DELETE` | `/tasks` | Delete all completed/failed tasks (optional `?username=` filter) |
-| `DELETE` | `/tasks/{task_id}` | Delete a single completed/failed task and its log file |
-| `GET`  | `/gpus` | Live GPU telemetry (temp, VRAM, active task, external process count) |
+| `DELETE` | `/tasks` | Delete all completed/failed tasks (`?username=` or `?admin_password=`) |
+| `DELETE` | `/tasks/{task_id}` | Delete a single completed/failed task (`?username=` or `?admin_password=`) |
+| `GET`  | `/gpus` | Live GPU telemetry (temp, VRAM, active task, external process count, fan status) |
+| `POST` | `/gpus/{gpu_id}/fan` | Set fan mode and speed (`{"mode": "auto"}` or `{"mode": "manual", "speed": 50}`) |
 | `GET`  | `/users` | List system users (uid ≥ 1000 with valid home dir) |
 | `GET`  | `/conda/envs/{username}` | List conda environments available to a user |
 | `GET`  | `/workdirs/{username}` | List top-level directories in user's home |
@@ -143,8 +146,11 @@ curl "http://localhost:8000/tasks/status?state=RUNNING&username=alice"
 ### Abort a task
 
 ```bash
-# Abort by task ID (optionally scoped to a user)
+# Abort by task ID (scoped to a user — no password needed)
 curl -X POST "http://localhost:8000/tasks/{task_id}/abort?username=your-user"
+
+# Abort as admin (no user selected — requires admin password)
+curl -X POST "http://localhost:8000/tasks/{task_id}/abort?admin_password=your-admin-password"
 ```
 
 ### View task logs
@@ -185,6 +191,42 @@ Set `env_type` to `"conda"` or `"venv"` and provide the environment identifier i
 **Conda:** The scheduler locates the target environment's python binary at `/home/<user>/<conda_dir>/envs/<env>/bin/python` (checking anaconda3, miniconda3, and miniforge3). It also reads `~/.conda/environments.txt` for additional env paths. The `base` environment is always available. The command runs under `bash -l` so conda-initialized shell environments are picked up.
 
 **Venv:** `conda_env` should be the full path to the venv directory. The scheduler uses `<conda_env>/bin/python` as the python binary. The path must be within the user's home directory.
+
+## GPU Fan Control
+
+GPU fan speeds are displayed on each GPU card in the dashboard. Clicking a GPU card opens the fan control modal, which allows switching between automatic and manual fan control.
+
+Fan control requires root privileges (the server runs with `sudo`) and is only supported on consumer GPUs (RTX series). Datacenter GPUs (A100, H100) typically use passive cooling and do not support NVML fan control. Fan support is detected automatically at runtime.
+
+On server shutdown, all fans are reset to automatic mode.
+
+```bash
+# Set fan to manual at 70%
+curl -X POST http://localhost:8000/gpus/0/fan \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "manual", "speed": 70}'
+
+# Reset fan to automatic
+curl -X POST http://localhost:8000/gpus/0/fan \
+  -H "Content-Type: application/json" \
+  -d '{"mode": "auto"}'
+```
+
+## Admin Password
+
+Set `ADMIN_PASSWORD` in `start.sh` (or as an environment variable) to protect privileged operations:
+
+```bash
+export ADMIN_PASSWORD="your-secret"
+sudo -E python3 main.py
+```
+
+When set:
+- **User-scoped operations** (selecting a user and managing their own tasks) — no password required
+- **Admin mode** (no user selected) — password required for abort, delete, and delete-all
+- **Cross-user operations** (managing another user's tasks) — requires admin credentials
+
+If `ADMIN_PASSWORD` is not set, admin-mode operations return 403 (disabled).
 
 ## Crash Recovery
 
