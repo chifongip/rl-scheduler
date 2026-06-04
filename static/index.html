@@ -173,11 +173,52 @@
     </div>
 </div>
 
+<!-- Fan Control Modal -->
+<div id="fan-modal" class="fixed inset-0 z-40 hidden flex items-center justify-center modal-bg" onclick="if(event.target===this)closeFanModal()">
+    <div class="bg-gray-900 rounded-lg border border-gray-700 w-full max-w-sm mx-4">
+        <div class="flex items-center justify-between px-5 py-3 border-b border-gray-800">
+            <h3 id="fan-modal-title" class="font-semibold text-sm">Fan Control</h3>
+            <button onclick="closeFanModal()" class="text-gray-500 hover:text-gray-300 text-xl">&times;</button>
+        </div>
+        <div class="px-5 py-4 space-y-4">
+            <div class="flex items-center justify-between text-sm">
+                <span class="text-gray-400">Current Speed</span>
+                <span id="fan-current-speed" class="font-bold text-lg">--</span>
+            </div>
+            <div class="flex items-center justify-between text-sm">
+                <span class="text-gray-400">Fans</span>
+                <span id="fan-count" class="text-gray-300">--</span>
+            </div>
+            <div>
+                <label class="block text-xs text-gray-400 mb-2">Mode</label>
+                <div class="flex gap-2">
+                    <button id="fan-mode-auto" onclick="setFanMode('auto')" class="flex-1 px-3 py-2 rounded text-sm font-medium transition bg-blue-600 text-white">Auto</button>
+                    <button id="fan-mode-manual" onclick="setFanMode('manual')" class="flex-1 px-3 py-2 rounded text-sm font-medium transition bg-gray-700 text-gray-300 hover:bg-gray-600">Manual</button>
+                </div>
+            </div>
+            <div id="fan-speed-control" class="hidden">
+                <label class="block text-xs text-gray-400 mb-2">Speed: <span id="fan-speed-value">50</span>%</label>
+                <input id="fan-speed-slider" type="range" min="0" max="100" value="50"
+                    class="w-full accent-blue-500" oninput="document.getElementById('fan-speed-value').textContent = this.value">
+                <div class="flex justify-between text-xs text-gray-500 mt-1">
+                    <span id="fan-speed-min">0%</span>
+                    <span id="fan-speed-max">100%</span>
+                </div>
+            </div>
+        </div>
+        <div class="flex items-center justify-end gap-2 px-5 py-3 border-t border-gray-800">
+            <button onclick="closeFanModal()" class="bg-gray-700 hover:bg-gray-600 text-gray-300 px-3 py-1.5 rounded text-xs transition">Close</button>
+            <button onclick="applyFanConfig()" class="bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 rounded text-xs transition">Apply</button>
+        </div>
+    </div>
+</div>
+
 <script>
 const API = '';
 let currentFilter = null;
 let pollingInterval = null;
 let currentUser = localStorage.getItem('rl-scheduler-user') || '';
+let cachedGpus = [];
 
 function getSelectedUser() {
     return document.getElementById('user-selector').value || currentUser;
@@ -240,9 +281,14 @@ async function refreshGpus() {
     const container = document.getElementById('gpu-cards');
     try {
         const { gpus } = await apiFetch('/gpus');
+        cachedGpus = gpus;
         if (!gpus.length) { container.innerHTML = '<div class="text-gray-500 text-sm">No GPUs managed</div>'; return; }
-        container.innerHTML = gpus.map(g => `
-            <div class="bg-gray-900 rounded-lg p-4 border border-gray-800">
+        container.innerHTML = gpus.map(g => {
+            const hasFan = g.fan_speed_pct != null;
+            const clickable = hasFan ? 'cursor-pointer hover:border-gray-600' : '';
+            const onclick = hasFan ? `onclick="openFanModal(${g.gpu_id})"` : '';
+            return `
+            <div class="bg-gray-900 rounded-lg p-4 border border-gray-800 transition ${clickable}" ${onclick}>
                 <div class="flex items-center justify-between mb-2">
                     <span class="font-semibold text-sm">GPU ${g.gpu_id}</span>
                     <span class="text-xs ${g.active_task_id ? 'text-blue-400' : g.external_process_count > 0 ? 'text-yellow-400' : 'text-gray-500'}">${g.active_task_id ? 'Running' : g.external_process_count > 0 ? 'Busy' : 'Idle'}</span>
@@ -257,14 +303,19 @@ async function refreshGpus() {
                         <div class="text-xs text-gray-500">VRAM</div>
                         <div class="text-lg font-bold">${g.memory_used_mb}<span class="text-xs text-gray-500 font-normal">/${g.memory_total_mb} MB</span></div>
                     </div>
+                    ${hasFan ? `<div>
+                        <div class="text-xs text-gray-500">Fan</div>
+                        <div class="text-lg font-bold">${g.fan_speed_pct}<span class="text-xs text-gray-500 font-normal">%</span></div>
+                    </div>` : ''}
                 </div>
                 <div class="w-full bg-gray-800 rounded-full h-2">
                     <div class="${memColor(g.memory_utilization_pct)} h-2 rounded-full transition-all" style="width:${Math.min(g.memory_utilization_pct, 100)}%"></div>
                 </div>
                 <div class="text-xs text-gray-500 mt-1 text-right">${g.memory_utilization_pct}%</div>
+                ${hasFan ? `<div class="text-xs text-gray-500 mt-1">Fan: <span class="text-gray-400">${g.fan_mode === 'manual' ? 'Manual' : 'Auto'}</span></div>` : ''}
                 ${g.active_task_id ? `<div class="text-xs text-gray-500 mt-1 truncate">Task: <span class="text-gray-400 font-mono">${g.active_task_id}</span></div>` : ''}
-            </div>
-        `).join('');
+            </div>`;
+        }).join('');
     } catch (e) {
         console.error('GPU refresh failed:', e);
         container.innerHTML = '<div class="text-red-400 col-span-full text-center py-4">Failed to fetch GPU status. Retrying...</div>';
@@ -669,6 +720,64 @@ function confirmBrowseSelection() {
 }
 
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeBrowseModal(); });
+
+// --- Fan control modal ---
+let fanModalGpuId = null;
+let fanModalMode = 'auto';
+
+function openFanModal(gpuId) {
+    const g = cachedGpus.find(x => x.gpu_id === gpuId);
+    if (!g || g.fan_speed_pct == null) return;
+    fanModalGpuId = gpuId;
+    document.getElementById('fan-modal-title').textContent = `Fan Control — GPU ${gpuId} (${g.name})`;
+    document.getElementById('fan-current-speed').textContent = `${g.fan_speed_pct}%`;
+    document.getElementById('fan-count').textContent = g.num_fans != null ? g.num_fans : '--';
+    setFanMode(g.fan_mode || 'auto');
+    if (g.fan_speed_pct != null) {
+        document.getElementById('fan-speed-slider').value = g.fan_speed_pct;
+        document.getElementById('fan-speed-value').textContent = g.fan_speed_pct;
+    }
+    document.getElementById('fan-modal').classList.remove('hidden');
+}
+
+function closeFanModal() {
+    document.getElementById('fan-modal').classList.add('hidden');
+    fanModalGpuId = null;
+}
+
+function setFanMode(mode) {
+    fanModalMode = mode;
+    const autoBtn = document.getElementById('fan-mode-auto');
+    const manualBtn = document.getElementById('fan-mode-manual');
+    const speedCtrl = document.getElementById('fan-speed-control');
+    if (mode === 'auto') {
+        autoBtn.className = 'flex-1 px-3 py-2 rounded text-sm font-medium transition bg-blue-600 text-white';
+        manualBtn.className = 'flex-1 px-3 py-2 rounded text-sm font-medium transition bg-gray-700 text-gray-300 hover:bg-gray-600';
+        speedCtrl.classList.add('hidden');
+    } else {
+        manualBtn.className = 'flex-1 px-3 py-2 rounded text-sm font-medium transition bg-blue-600 text-white';
+        autoBtn.className = 'flex-1 px-3 py-2 rounded text-sm font-medium transition bg-gray-700 text-gray-300 hover:bg-gray-600';
+        speedCtrl.classList.remove('hidden');
+    }
+}
+
+async function applyFanConfig() {
+    if (fanModalGpuId == null) return;
+    const body = { mode: fanModalMode };
+    if (fanModalMode === 'manual') {
+        body.speed = parseInt(document.getElementById('fan-speed-slider').value);
+    }
+    try {
+        await apiFetch(`/gpus/${fanModalGpuId}/fan`, { method: 'POST', body: JSON.stringify(body) });
+        showToast(`GPU ${fanModalGpuId} fan set to ${fanModalMode}${fanModalMode === 'manual' ? ' (' + body.speed + '%)' : ''}`, 'success');
+        closeFanModal();
+        refreshGpus();
+    } catch (err) {
+        showToast(err.message, 'error');
+    }
+}
+
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeFanModal(); });
 
 // --- Init ---
 loadUsers();

@@ -14,6 +14,7 @@ from pydantic import BaseModel
 from hardware import GpuManager
 from models import (
     DB_PATH,
+    FanConfig,
     TaskSubmit,
     delete_all_tasks,
     delete_task,
@@ -243,6 +244,24 @@ async def delete_task_endpoint(task_id: str):
 async def get_gpus():
     statuses = gpu_manager.get_all_gpu_status()
     return GpuListResponse(gpus=[s.model_dump() for s in statuses])
+
+
+@app.post("/gpus/{gpu_id}/fan")
+async def set_gpu_fan(gpu_id: int, body: FanConfig):
+    if gpu_id not in gpu_manager.managed_gpu_ids:
+        raise HTTPException(status_code=400, detail=f"Invalid GPU ID {gpu_id}")
+    try:
+        if body.mode == "auto":
+            result = gpu_manager.set_fan_auto(gpu_id)
+        elif body.mode == "manual":
+            if body.speed is None:
+                raise HTTPException(status_code=400, detail="speed is required when mode is 'manual'")
+            result = gpu_manager.set_fan_speed(gpu_id, body.speed)
+        else:
+            raise HTTPException(status_code=400, detail=f"Invalid mode: {body.mode}. Must be 'auto' or 'manual'.")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return result
 
 
 @app.get("/users", response_model=UsersListResponse)

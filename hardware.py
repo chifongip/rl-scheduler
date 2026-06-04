@@ -34,6 +34,8 @@ class GpuManager:
 
         # task_id -> gpu_id mapping for active jobs
         self.active_tasks: dict[str, int] = {}
+        # fan capability cache: gpu_id -> {num_fans, min_speed, max_speed} or None
+        self._fan_support: dict[int, dict | None] = {}
         logger.info("GpuManager initialized: managing GPUs %s (bus IDs: %s)",
                      self.managed_gpu_ids,
                      [self.bus_id_map[gid] for gid in self.managed_gpu_ids])
@@ -63,6 +65,25 @@ class GpuManager:
                 active_task_id = tid
                 break
         external_count = self._count_external_compute_procs(gpu_id)
+
+        # Fan info (None if unsupported)
+        fan_speed = None
+        fan_mode = None
+        num_fans = None
+        try:
+            fan_info = self._probe_fan_support(gpu_id)
+            if fan_info is not None:
+                num_fans = fan_info["num_fans"]
+                handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_id)
+                fan_speed = pynvml.nvmlDeviceGetFanSpeed_v2(handle, 0)
+                try:
+                    policy = pynvml.nvmlDeviceGetFanControlPolicy_v2(handle, 0)
+                    fan_mode = "manual" if policy == pynvml.NVML_FAN_POLICY_MANUAL else "auto"
+                except pynvml.NVMLError:
+                    fan_mode = "auto"
+        except pynvml.NVMLError:
+            pass
+
         return GpuStatus(
             gpu_id=gpu_id,
             name=name,
@@ -72,6 +93,9 @@ class GpuManager:
             memory_utilization_pct=mem_pct,
             active_task_id=active_task_id,
             external_process_count=external_count,
+            fan_speed_pct=fan_speed,
+            fan_mode=fan_mode,
+            num_fans=num_fans,
         )
 
     def get_all_gpu_status(self) -> list[GpuStatus]:
@@ -126,6 +150,86 @@ class GpuManager:
     def unregister_task(self, task_id: str) -> None:
         self.active_tasks.pop(task_id, None)
 
+    def _probe_fan_support(self, gpu_id: int) -> dict | None:
+        if gpu_id in self._fan_support:
+            return self._fan_support[gpu_id]
+        try:
+            handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_id)
+            num_fans = pynvml.nvmlDeviceGetNumFans(handle)
+            min_speed, max_speed = pynvml.nvmlDeviceGetMinMaxFanSpeed(handle)
+            info = {"num_fans": num_fans, "min_speed": min_speed, "max_speed": max_speed}
+            self._fan_support[gpu_id] = info
+            return info
+        except pynvml.NVMLError:
+            self._fan_support[gpu_id] = None
+            return None
+
+    def get_fan_status(self, gpu_id: int) -> dict:
+        fan_info = self._probe_fan_support(gpu_id)
+        if fan_info is None:
+            return {"fan_supported": False}
+        handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_id)
+        try:
+            speed = pynvml.nvmlDeviceGetFanSpeed_v2(handle, 0)
+        except pynvml.NVMLError:
+            speed = None
+        try:
+            policy = pynvml.nvmlDeviceGetFanControlPolicy_v2(handle, 0)
+            mode = "manual" if policy == pynvml.NVML_FAN_POLICY_MANUAL else "auto"
+        except pynvml.NVMLError:
+            mode = "auto"
+        return {
+            "fan_supported": True,
+            "fan_speed_pct": speed,
+            "fan_mode": mode,
+            "num_fans": fan_info["num_fans"],
+            "min_speed": fan_info["min_speed"],
+            "max_speed": fan_info["max_speed"],
+        }
+
+    def set_fan_speed(self, gpu_id: int, speed: int) -> dict:
+        fan_info = self._probe_fan_support(gpu_id)
+        if fan_info is None:
+            raise ValueError(f"GPU {gpu_id} does not support fan control")
+        if speed < fan_info["min_speed"] or speed > fan_info["max_speed"]:
+            raise ValueError(f"Fan speed {speed} out of range [{fan_info['min_speed']}, {fan_info['max_speed']}]")
+        handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_id)
+        # Set manual mode first
+        try:
+            pynvml.nvmlDeviceSetFanControlPolicy(handle, 0, pynvml.NVML_FAN_POLICY_MANUAL)
+        except pynvml.NVMLError as e:
+            logger.warning("Could not set fan policy to manual on GPU %d: %s", gpu_id, e)
+        pynvml.nvmlDeviceSetFanSpeed_v2(handle, 0, speed)
+        logger.info("GPU %d fan speed set to %d%%", gpu_id, speed)
+        return self.get_fan_status(gpu_id)
+
+    def set_fan_auto(self, gpu_id: int) -> dict:
+        fan_info = self._probe_fan_support(gpu_id)
+        if fan_info is None:
+            raise ValueError(f"GPU {gpu_id} does not support fan control")
+        handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_id)
+        try:
+            pynvml.nvmlDeviceSetDefaultFanSpeed_v2(handle, 0)
+        except pynvml.NVMLError as e:
+            logger.warning("Could not reset fan speed on GPU %d: %s", gpu_id, e)
+        try:
+            pynvml.nvmlDeviceSetFanControlPolicy(handle, 0, pynvml.NVML_FAN_POLICY_TEMPERATURE_CONTINOUS_SW)
+        except pynvml.NVMLError as e:
+            logger.warning("Could not restore fan policy on GPU %d: %s", gpu_id, e)
+        logger.info("GPU %d fan reset to automatic", gpu_id)
+        return self.get_fan_status(gpu_id)
+
     def shutdown(self) -> None:
+        # Reset all GPUs to automatic fan control before shutting down
+        for gid in self.managed_gpu_ids:
+            fan_info = self._probe_fan_support(gid)
+            if fan_info is not None:
+                try:
+                    handle = pynvml.nvmlDeviceGetHandleByIndex(gid)
+                    pynvml.nvmlDeviceSetDefaultFanSpeed_v2(handle, 0)
+                    pynvml.nvmlDeviceSetFanControlPolicy(handle, 0, pynvml.NVML_FAN_POLICY_TEMPERATURE_CONTINOUS_SW)
+                    logger.info("GPU %d fan reset to automatic on shutdown", gid)
+                except pynvml.NVMLError as e:
+                    logger.warning("Could not reset fan on GPU %d during shutdown: %s", gid, e)
         pynvml.nvmlShutdown()
         logger.info("GpuManager shut down")

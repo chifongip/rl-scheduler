@@ -114,6 +114,14 @@ class GpuStatus(BaseModel):
     memory_utilization_pct: float
     active_task_id: str | None
     external_process_count: int = 0
+    fan_speed_pct: int | None = None
+    fan_mode: str | None = None
+    num_fans: int | None = None
+
+
+class FanConfig(BaseModel):
+    mode: str = "auto"
+    speed: int | None = None
 
 
 # --- DB helpers ---
