@@ -49,16 +49,8 @@ class GpuManager:
         mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
         mem_total_mb = mem_info.total // (1024 * 1024)
 
-        # Sum per-process memory to match nvidia-smi's "Used" (excludes driver overhead)
-        try:
-            compute_procs = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
-            graphics_procs = pynvml.nvmlDeviceGetGraphicsRunningProcesses(handle)
-            proc_mem = sum(p.usedGpuMemory or 0 for p in compute_procs + graphics_procs)
-        except pynvml.NVMLError:
-            proc_mem = mem_info.used  # fallback to v1 if process query fails
-
-        mem_used_mb = proc_mem // (1024 * 1024)
-        mem_pct = round(proc_mem / mem_info.total * 100, 1) if mem_info.total > 0 else 0.0
+        mem_used_mb = mem_info.used // (1024 * 1024)
+        mem_pct = round(mem_info.used / mem_info.total * 100, 1) if mem_info.total > 0 else 0.0
         active_task_id = None
         for tid, gid in self.active_tasks.items():
             if gid == gpu_id:

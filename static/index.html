@@ -220,6 +220,7 @@ let pollingInterval = null;
 let currentUser = localStorage.getItem('rl-scheduler-user') || '';
 let cachedGpus = [];
 let adminPassword = '';
+let expandedCommands = new Set();
 
 function getSelectedUser() {
     return document.getElementById('user-selector').value || currentUser;
@@ -493,11 +494,15 @@ function buildActionsCell(t) {
 }
 
 function buildTaskRow(t) {
+    const expanded = expandedCommands.has(t.id);
+    const tdClass = expanded ? 'px-4 py-2.5' : 'px-4 py-2.5 max-w-xs';
+    const spanClass = expanded ? 'font-mono text-xs' : 'font-mono text-xs truncate';
+    const chevron = expanded ? '&#9650;' : '&#9660;';
     return `
         <tr data-task-id="${t.id}" data-state="${t.state}" class="border-b border-gray-800 hover:bg-gray-800/50 transition">
             <td class="px-4 py-2.5 font-mono text-xs text-gray-400">${t.id}</td>
             <td class="px-4 py-2.5 text-xs text-gray-300">${t.username || '--'}</td>
-            <td class="px-4 py-2.5 font-mono text-xs max-w-xs truncate cursor-pointer" title="${escapeHtml(t.command)}" onclick="toggleCommand(this)">${escapeHtml(t.command)}</td>
+            <td class="${tdClass} flex items-center gap-1" data-cmd-td><span class="${spanClass} flex-1 min-w-0" data-cmd-text>${escapeHtml(t.command)}</span> <button onclick="toggleCommand(this, '${t.id}')" class="text-gray-500 hover:text-gray-300 text-xs flex-shrink-0" title="Expand/collapse">${chevron}</button></td>
             <td class="px-4 py-2.5 text-xs">${t.gpu_id != null ? 'GPU ' + t.gpu_id : '--'}</td>
             <td class="px-4 py-2.5 text-center text-xs">${t.priority}</td>
             <td data-cell="state" class="px-4 py-2.5 text-center">${stateBadge(t.state)}</td>
@@ -551,6 +556,11 @@ async function refreshTasks() {
                 tbody.insertAdjacentHTML('beforeend', buildTaskRow(t));
             }
         }
+
+        // Prune expanded state for tasks no longer in the list
+        for (const id of expandedCommands) {
+            if (!newById.has(id)) expandedCommands.delete(id);
+        }
     } catch (e) { console.error('Task refresh failed:', e); }
 }
 
@@ -562,9 +572,18 @@ function escapeAttr(s) {
     return escapeHtml(s.replace(/\\/g, '\\\\').replace(/'/g, "\\'"));
 }
 
-function toggleCommand(el) {
-    el.classList.toggle('truncate');
-    el.classList.toggle('max-w-xs');
+function toggleCommand(btn, taskId) {
+    const td = btn.closest('td');
+    const span = td.querySelector('[data-cmd-text]');
+    td.classList.toggle('max-w-xs');
+    span.classList.toggle('truncate');
+    if (expandedCommands.has(taskId)) {
+        expandedCommands.delete(taskId);
+        btn.innerHTML = '&#9660;';
+    } else {
+        expandedCommands.add(taskId);
+        btn.innerHTML = '&#9650;';
+    }
 }
 
 // --- Filter tabs ---
