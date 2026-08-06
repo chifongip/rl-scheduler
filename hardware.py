@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import threading
 
 import pynvml
 
@@ -20,12 +22,15 @@ class GpuManager:
                 raise ValueError(f"GPU {gid} not found (system has {device_count} GPUs)")
         # Build PCI Bus-Id map and sort by Bus-Id to match nvidia-smi order
         self.bus_id_map: dict[int, str] = {}
+        self.cuda_identifiers: dict[int, str] = {}
         nvml_bus_int: dict[int, int] = {}  # NVML index → bus number as int
         for gid in managed_gpu_ids:
             handle = pynvml.nvmlDeviceGetHandleByIndex(gid)
             pci = pynvml.nvmlDeviceGetPciInfo(handle)
             bus_id = pci.busId if isinstance(pci.busId, str) else pci.busId.decode()
             self.bus_id_map[gid] = bus_id
+            uuid = pynvml.nvmlDeviceGetUUID(handle)
+            self.cuda_identifiers[gid] = uuid.decode() if isinstance(uuid, bytes) else uuid
             # Extract bus number from "00000000:47:00.0" → 0x47
             bus_hex = bus_id.split(":")[1]
             nvml_bus_int[gid] = int(bus_hex, 16)
@@ -34,6 +39,8 @@ class GpuManager:
 
         # task_id -> gpu_id mapping for active jobs
         self.active_tasks: dict[str, int] = {}
+        self.active_process_groups: dict[str, int] = {}
+        self._lock = threading.RLock()
         # fan capability cache: gpu_id -> {num_fans, min_speed, max_speed} or None
         self._fan_support: dict[int, dict | None] = {}
         logger.info("GpuManager initialized: managing GPUs %s (bus IDs: %s)",
@@ -52,10 +59,11 @@ class GpuManager:
         mem_used_mb = mem_info.used // (1024 * 1024)
         mem_pct = round(mem_info.used / mem_info.total * 100, 1) if mem_info.total > 0 else 0.0
         active_task_id = None
-        for tid, gid in self.active_tasks.items():
-            if gid == gpu_id:
-                active_task_id = tid
-                break
+        with self._lock:
+            for tid, gid in self.active_tasks.items():
+                if gid == gpu_id:
+                    active_task_id = tid
+                    break
         external_count = self._count_external_compute_procs(gpu_id)
 
         # Fan info (None if unsupported)
@@ -104,8 +112,15 @@ class GpuManager:
         try:
             handle = pynvml.nvmlDeviceGetHandleByIndex(gpu_id)
             compute_procs = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
+            with self._lock:
+                managed_groups = set(self.active_process_groups.values())
             count = 0
             for p in compute_procs:
+                try:
+                    if os.getpgid(p.pid) in managed_groups:
+                        continue
+                except (ProcessLookupError, PermissionError, OSError):
+                    pass
                 try:
                     name = pynvml.nvmlSystemGetProcessName(p.pid)
                     if isinstance(name, bytes):
@@ -121,9 +136,10 @@ class GpuManager:
     def is_gpu_available(self, gpu_id: int) -> bool:
         if gpu_id not in self.managed_gpu_ids:
             return False
-        if gpu_id in self.active_tasks.values():
-            logger.debug("GPU %d unavailable: has scheduler-managed task", gpu_id)
-            return False
+        with self._lock:
+            if gpu_id in self.active_tasks.values():
+                logger.debug("GPU %d unavailable: has scheduler-managed task", gpu_id)
+                return False
         ext = self._count_external_compute_procs(gpu_id)
         if ext:
             logger.info("GPU %d unavailable: %d compute process(es) running", gpu_id, ext)
@@ -136,11 +152,24 @@ class GpuManager:
                 return gid
         return None
 
-    def register_task(self, task_id: str, gpu_id: int) -> None:
-        self.active_tasks[task_id] = gpu_id
+    def get_available_gpu_ids(self) -> list[int]:
+        """Return one availability snapshot for a scheduler dispatch cycle."""
+        return [gid for gid in self.managed_gpu_ids if self.is_gpu_available(gid)]
+
+    def get_cuda_identifier(self, gpu_id: int) -> str:
+        """Return a stable CUDA-visible identifier for the physical GPU."""
+        return self.cuda_identifiers[gpu_id]
+
+    def register_task(self, task_id: str, gpu_id: int, process_group_id: int | None = None) -> None:
+        with self._lock:
+            self.active_tasks[task_id] = gpu_id
+            if process_group_id is not None:
+                self.active_process_groups[task_id] = process_group_id
 
     def unregister_task(self, task_id: str) -> None:
-        self.active_tasks.pop(task_id, None)
+        with self._lock:
+            self.active_tasks.pop(task_id, None)
+            self.active_process_groups.pop(task_id, None)
 
     def _probe_fan_support(self, gpu_id: int) -> dict | None:
         if gpu_id in self._fan_support:

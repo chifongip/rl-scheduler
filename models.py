@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import time
 import uuid
+from typing import Literal
 
 import aiosqlite
 from pydantic import BaseModel, Field
@@ -26,13 +27,10 @@ CREATE TABLE IF NOT EXISTS tasks (
     log_path          TEXT,
     created_at        REAL NOT NULL,
     started_at        REAL,
-    finished_at       REAL
+    finished_at       REAL,
+    status_reason     TEXT,
+    runner_unit       TEXT
 );
-"""
-
-RECOVER_STUCK_SQL = """
-UPDATE tasks SET state = 'FAILED', exit_code = -1
-WHERE state = 'RUNNING';
 """
 
 INSERT_SQL = """
@@ -56,18 +54,36 @@ ORDER BY priority DESC, created_at ASC;
 """
 
 UPDATE_TO_RUNNING_SQL = """
-UPDATE tasks SET state = 'RUNNING', gpu_id = ?, pid = ?, started_at = ?, log_path = ?
+UPDATE tasks SET state = 'RUNNING', pid = ?, status_reason = NULL
+WHERE id = ? AND state = 'STARTING';
+"""
+
+CLAIM_STARTING_SQL = """
+UPDATE tasks SET state = 'STARTING', gpu_id = ?, started_at = ?, log_path = ?,
+runner_unit = ?, status_reason = NULL
 WHERE id = ? AND state = 'PENDING';
 """
 
+RESET_STARTING_SQL = """
+UPDATE tasks SET state = 'PENDING', gpu_id = NULL, pid = NULL, started_at = NULL,
+log_path = NULL, runner_unit = NULL, status_reason = ?
+WHERE id = ? AND state = 'STARTING';
+"""
+
 UPDATE_FINISHED_SQL = """
-UPDATE tasks SET state = ?, exit_code = ?, finished_at = ?
-WHERE id = ? AND state = 'RUNNING';
+UPDATE tasks SET state = ?, exit_code = ?, finished_at = ?, status_reason = ?
+WHERE id = ? AND state IN ('STARTING', 'RUNNING');
 """
 
 SET_ABORTED_SQL = """
-UPDATE tasks SET state = 'FAILED', exit_code = -9, finished_at = ?
-WHERE id = ? AND state IN ('PENDING', 'RUNNING');
+UPDATE tasks SET state = 'FAILED', exit_code = -9, finished_at = ?, status_reason = ?
+WHERE id = ? AND state IN ('PENDING', 'STARTING', 'RUNNING');
+"""
+
+FAIL_PENDING_SQL = """
+UPDATE tasks SET state = 'FAILED', exit_code = -1, finished_at = ?, status_reason = ?,
+log_path = COALESCE(?, log_path)
+WHERE id = ? AND state = 'PENDING';
 """
 
 
@@ -103,6 +119,8 @@ class TaskStatus(BaseModel):
     duration: float | None
     progress: float | None = None
     eta: float | None = None
+    status_reason: str | None = None
+    runner_unit: str | None = None
 
 
 class GpuStatus(BaseModel):
@@ -120,27 +138,30 @@ class GpuStatus(BaseModel):
 
 
 class FanConfig(BaseModel):
-    mode: str = "auto"
-    speed: int | None = None
+    mode: Literal["auto", "manual"] = "auto"
+    speed: int | None = Field(default=None, ge=0, le=100)
 
 
 # --- DB helpers ---
 
 async def init_db(db_path: str = DB_PATH) -> aiosqlite.Connection:
     db = await aiosqlite.connect(db_path)
+    db.row_factory = aiosqlite.Row
     await db.execute(CREATE_TABLE_SQL)
-    # Migrate: add env_type column if missing (for existing databases)
     cursor = await db.execute("PRAGMA table_info(tasks)")
     columns = {row[1] for row in await cursor.fetchall()}
     if "env_type" not in columns:
         await db.execute("ALTER TABLE tasks ADD COLUMN env_type TEXT")
-    # Recover tasks that were RUNNING when the scheduler last crashed
-    cursor = await db.execute(RECOVER_STUCK_SQL)
-    if cursor.rowcount > 0:
-        import logging
-        logging.getLogger("models").warning(
-            "Recovered %d stuck RUNNING tasks → FAILED on startup", cursor.rowcount
-        )
+    if "status_reason" not in columns:
+        await db.execute("ALTER TABLE tasks ADD COLUMN status_reason TEXT")
+    if "runner_unit" not in columns:
+        await db.execute("ALTER TABLE tasks ADD COLUMN runner_unit TEXT")
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_pending ON tasks(state, priority DESC, created_at ASC)"
+    )
+    await db.execute(
+        "CREATE INDEX IF NOT EXISTS idx_tasks_user_state ON tasks(username, state, created_at DESC)"
+    )
     await db.commit()
     return db
 
@@ -158,25 +179,80 @@ async def insert_task(db: aiosqlite.Connection, submit: TaskSubmit) -> str:
 async def get_pending_tasks(db: aiosqlite.Connection) -> list[dict]:
     cursor = await db.execute(SELECT_PENDING_SQL)
     rows = await cursor.fetchall()
-    cols = [d[0] for d in cursor.description]
-    return [dict(zip(cols, row)) for row in rows]
+    return [dict(row) for row in rows]
 
 
-async def set_task_running(db: aiosqlite.Connection, task_id: str, gpu_id: int, pid: int, log_path: str) -> bool:
-    cursor = await db.execute(UPDATE_TO_RUNNING_SQL, (gpu_id, pid, time.time(), log_path, task_id))
+async def get_managed_tasks(db: aiosqlite.Connection) -> list[dict]:
+    cursor = await db.execute(
+        "SELECT * FROM tasks WHERE state IN ('STARTING', 'RUNNING') ORDER BY started_at ASC"
+    )
+    return [dict(row) for row in await cursor.fetchall()]
+
+
+async def claim_task_starting(
+    db: aiosqlite.Connection,
+    task_id: str,
+    gpu_id: int,
+    log_path: str,
+    runner_unit: str,
+) -> bool:
+    cursor = await db.execute(
+        CLAIM_STARTING_SQL, (gpu_id, time.time(), log_path, runner_unit, task_id)
+    )
     await db.commit()
     return cursor.rowcount > 0
 
 
-async def set_task_finished(db: aiosqlite.Connection, task_id: str, exit_code: int) -> bool:
+async def set_task_running(db: aiosqlite.Connection, task_id: str, pid: int) -> bool:
+    cursor = await db.execute(UPDATE_TO_RUNNING_SQL, (pid, task_id))
+    await db.commit()
+    return cursor.rowcount > 0
+
+
+async def reset_starting_task(
+    db: aiosqlite.Connection, task_id: str, reason: str
+) -> bool:
+    cursor = await db.execute(RESET_STARTING_SQL, (reason[:500], task_id))
+    await db.commit()
+    return cursor.rowcount > 0
+
+
+async def clear_runner_unit(db: aiosqlite.Connection, task_id: str) -> None:
+    await db.execute("UPDATE tasks SET runner_unit = NULL WHERE id = ?", (task_id,))
+    await db.commit()
+
+
+async def set_task_finished(
+    db: aiosqlite.Connection,
+    task_id: str,
+    exit_code: int,
+    status_reason: str | None = None,
+) -> bool:
     state = "COMPLETED" if exit_code == 0 else "FAILED"
-    cursor = await db.execute(UPDATE_FINISHED_SQL, (state, exit_code, time.time(), task_id))
+    cursor = await db.execute(
+        UPDATE_FINISHED_SQL, (state, exit_code, time.time(), status_reason, task_id)
+    )
     await db.commit()
     return cursor.rowcount > 0
 
 
-async def set_task_aborted(db: aiosqlite.Connection, task_id: str) -> bool:
-    cursor = await db.execute(SET_ABORTED_SQL, (time.time(), task_id))
+async def set_task_aborted(
+    db: aiosqlite.Connection, task_id: str, reason: str = "aborted_by_user"
+) -> bool:
+    cursor = await db.execute(SET_ABORTED_SQL, (time.time(), reason, task_id))
+    await db.commit()
+    return cursor.rowcount > 0
+
+
+async def fail_pending_task(
+    db: aiosqlite.Connection,
+    task_id: str,
+    reason: str,
+    log_path: str | None = None,
+) -> bool:
+    cursor = await db.execute(
+        FAIL_PENDING_SQL, (time.time(), reason[:500], log_path, task_id)
+    )
     await db.commit()
     return cursor.rowcount > 0
 
@@ -186,7 +262,7 @@ async def delete_task(db: aiosqlite.Connection, task_id: str) -> bool:
     if row is None:
         return False
     cursor = await db.execute(
-        "DELETE FROM tasks WHERE id = ? AND state NOT IN ('RUNNING', 'PENDING')",
+        "DELETE FROM tasks WHERE id = ? AND state NOT IN ('RUNNING', 'STARTING', 'PENDING')",
         (task_id,),
     )
     await db.commit()
@@ -220,7 +296,8 @@ async def delete_all_tasks(db: aiosqlite.Connection, username: str | None = None
     else:
         cursor = await db.execute("DELETE FROM tasks WHERE state IN ('COMPLETED', 'FAILED')")
     await db.commit()
-    for (log_path,) in rows:
+    for row in rows:
+        log_path = row[0]
         if log_path and os.path.isfile(log_path):
             try:
                 os.remove(log_path)
@@ -234,22 +311,55 @@ async def get_task_by_id(db: aiosqlite.Connection, task_id: str) -> dict | None:
     row = await cursor.fetchone()
     if row is None:
         return None
-    cols = [d[0] for d in cursor.description]
-    return dict(zip(cols, row))
+    return dict(row)
 
 
-async def get_tasks(db: aiosqlite.Connection, state: str | None = None, username: str | None = None) -> list[dict]:
-    if state and username:
-        cursor = await db.execute(SELECT_BY_STATE_AND_USERNAME_SQL, (state, username))
-    elif state:
-        cursor = await db.execute(SELECT_BY_STATE_SQL, (state,))
-    elif username:
-        cursor = await db.execute(SELECT_BY_USERNAME_SQL, (username,))
-    else:
-        cursor = await db.execute(SELECT_ALL_SQL)
+async def get_tasks(
+    db: aiosqlite.Connection,
+    state: str | None = None,
+    username: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+    query: str | None = None,
+) -> list[dict]:
+    where, params = _task_filters(state, username, query)
+    sql = f"SELECT * FROM tasks{where} ORDER BY created_at DESC"
+    if limit is not None:
+        sql += " LIMIT ? OFFSET ?"
+        params.extend((limit, offset))
+    cursor = await db.execute(sql, params)
     rows = await cursor.fetchall()
-    cols = [d[0] for d in cursor.description]
-    return [dict(zip(cols, row)) for row in rows]
+    return [dict(row) for row in rows]
+
+
+async def count_tasks(
+    db: aiosqlite.Connection,
+    state: str | None = None,
+    username: str | None = None,
+    query: str | None = None,
+) -> int:
+    where, params = _task_filters(state, username, query)
+    cursor = await db.execute(f"SELECT COUNT(*) FROM tasks{where}", params)
+    row = await cursor.fetchone()
+    return int(row[0])
+
+
+def _task_filters(
+    state: str | None, username: str | None, query: str | None
+) -> tuple[str, list[object]]:
+    clauses: list[str] = []
+    params: list[object] = []
+    if state:
+        clauses.append("state = ?")
+        params.append(state)
+    if username:
+        clauses.append("username = ?")
+        params.append(username)
+    if query:
+        pattern = f"%{query.strip()}%"
+        clauses.append("(id LIKE ? OR username LIKE ? OR command LIKE ? OR work_dir LIKE ?)")
+        params.extend((pattern, pattern, pattern, pattern))
+    return (" WHERE " + " AND ".join(clauses) if clauses else "", params)
 
 
 def row_to_status(row: dict) -> TaskStatus:
@@ -276,4 +386,6 @@ def row_to_status(row: dict) -> TaskStatus:
         started_at=row["started_at"],
         finished_at=row["finished_at"],
         duration=duration,
+        status_reason=row.get("status_reason"),
+        runner_unit=row.get("runner_unit"),
     )

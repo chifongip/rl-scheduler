@@ -12,6 +12,7 @@
         .badge-running { animation: badge-pulse 1.5s ease-in-out infinite; }
         .toast { transition: opacity 0.3s, transform 0.3s; }
         .modal-bg { background: rgba(0,0,0,0.5); }
+        :focus-visible { outline: 2px solid #60a5fa; outline-offset: 2px; }
     </style>
 </head>
 <body class="bg-gray-950 text-gray-100 min-h-screen">
@@ -20,7 +21,7 @@
 <div id="toasts" class="fixed top-4 right-4 z-50 flex flex-col gap-2"></div>
 
 <!-- Header -->
-<header class="bg-gray-900 border-b border-gray-800 px-6 py-3 flex items-center justify-between">
+<header class="bg-gray-900 border-b border-gray-800 px-4 md:px-6 py-3 flex flex-wrap items-center justify-between gap-3">
     <div class="flex items-center gap-3">
         <h1 class="text-xl font-bold tracking-tight">rl-scheduler</h1>
         <div id="health-indicator" class="flex items-center gap-1.5 text-sm">
@@ -28,12 +29,13 @@
             <span class="text-gray-400">Connecting...</span>
         </div>
     </div>
-    <div class="flex items-center gap-3 text-sm">
+    <div class="flex flex-wrap items-center gap-2 md:gap-3 text-sm">
         <select id="user-selector" class="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500">
             <option value="">Select user...</option>
         </select>
         <span id="stat-gpus" class="bg-gray-800 px-2.5 py-1 rounded">-- GPUs</span>
         <span id="stat-running" class="bg-gray-800 px-2.5 py-1 rounded">-- Running</span>
+        <span id="stat-starting" class="bg-gray-800 px-2.5 py-1 rounded">-- Starting</span>
         <span id="stat-pending" class="bg-gray-800 px-2.5 py-1 rounded">-- Pending</span>
         <span id="last-updated" class="text-gray-500 text-xs ml-2"></span>
     </div>
@@ -94,7 +96,7 @@
                     </select>
                 </div>
                 <div class="flex items-end">
-                    <button type="submit" class="bg-blue-600 hover:bg-blue-500 text-white px-5 py-2 rounded text-sm font-medium transition">
+                    <button id="submit-button" type="submit" class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-5 py-2 rounded text-sm font-medium transition">
                         Submit
                     </button>
                 </div>
@@ -104,12 +106,19 @@
 
     <!-- Task List -->
     <section>
-        <div class="flex items-center justify-between mb-3">
+        <div class="flex flex-wrap items-center justify-between gap-3 mb-3">
             <h2 class="text-sm font-semibold text-gray-400 uppercase tracking-wider">Tasks</h2>
-            <div class="flex items-center gap-2">
+            <div class="flex flex-wrap items-center gap-2">
+                <input id="task-search" type="search" placeholder="Search tasks..." aria-label="Search tasks"
+                    class="w-40 bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs focus:outline-none focus:border-blue-500">
+                <select id="task-scope" aria-label="Task user scope" class="bg-gray-900 border border-gray-700 rounded px-2 py-1 text-xs">
+                    <option value="all">All users</option>
+                    <option value="selected">Selected user</option>
+                </select>
                 <div class="flex gap-1" id="filter-tabs">
                     <button onclick="setFilter(null)" class="filter-tab active px-3 py-1 text-xs rounded bg-gray-800 text-gray-300 hover:bg-gray-700 transition">All</button>
                     <button onclick="setFilter('PENDING')" class="filter-tab px-3 py-1 text-xs rounded text-gray-500 hover:bg-gray-800 transition">Pending</button>
+                    <button onclick="setFilter('STARTING')" class="filter-tab px-3 py-1 text-xs rounded text-gray-500 hover:bg-gray-800 transition">Starting</button>
                     <button onclick="setFilter('RUNNING')" class="filter-tab px-3 py-1 text-xs rounded text-gray-500 hover:bg-gray-800 transition">Running</button>
                     <button onclick="setFilter('COMPLETED')" class="filter-tab px-3 py-1 text-xs rounded text-gray-500 hover:bg-gray-800 transition">Completed</button>
                     <button onclick="setFilter('FAILED')" class="filter-tab px-3 py-1 text-xs rounded text-gray-500 hover:bg-gray-800 transition">Failed</button>
@@ -117,7 +126,7 @@
                 <button onclick="deleteAllTasks()" class="px-3 py-1 text-xs rounded bg-red-600/80 hover:bg-red-500 text-white transition">Delete All</button>
             </div>
         </div>
-        <div class="bg-gray-900 rounded-lg border border-gray-800 overflow-hidden">
+        <div class="bg-gray-900 rounded-lg border border-gray-800 overflow-x-auto">
             <table class="w-full text-sm">
                 <thead>
                     <tr class="text-xs text-gray-500 uppercase border-b border-gray-800">
@@ -137,28 +146,39 @@
                 </tbody>
             </table>
         </div>
+        <div class="flex items-center justify-end gap-3 mt-3 text-xs text-gray-400">
+            <span id="task-page-summary">0 tasks</span>
+            <button id="task-prev" class="px-3 py-1 rounded bg-gray-800 hover:bg-gray-700 disabled:opacity-40" disabled>Previous</button>
+            <button id="task-next" class="px-3 py-1 rounded bg-gray-800 hover:bg-gray-700 disabled:opacity-40" disabled>Next</button>
+        </div>
     </section>
 </main>
 
 <!-- Log Modal -->
-<div id="log-modal" class="fixed inset-0 z-40 hidden flex items-center justify-center modal-bg" onclick="if(event.target===this)closeLogModal()">
-    <div class="bg-gray-900 rounded-lg border border-gray-700 w-full max-w-4xl max-h-[85vh] flex flex-col mx-4">
+<div id="log-modal" class="fixed inset-0 z-40 hidden flex items-center justify-center modal-bg" role="dialog" aria-modal="true" aria-labelledby="log-title">
+    <div class="bg-gray-900 rounded-lg border border-gray-700 w-full max-w-4xl h-[85vh] flex flex-col mx-4">
         <div class="flex items-center justify-between px-5 py-3 border-b border-gray-800">
             <div>
-                <h3 class="font-semibold text-sm">Task Log</h3>
+                <h3 id="log-title" class="font-semibold text-sm">Task Log</h3>
                 <p id="log-meta" class="text-xs text-gray-500 mt-0.5"></p>
             </div>
-            <button onclick="closeLogModal()" class="text-gray-500 hover:text-gray-300 text-xl">&times;</button>
+            <div class="flex items-center gap-2">
+                <label class="text-xs text-gray-400"><input id="log-autoscroll" type="checkbox" checked class="mr-1">Auto-scroll</label>
+                <button id="log-copy" class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded text-xs">Copy</button>
+                <button id="log-refresh" class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded text-xs">Refresh</button>
+                <button onclick="closeLogModal()" aria-label="Close log" class="text-gray-500 hover:text-gray-300 text-xl">&times;</button>
+            </div>
         </div>
+        <div id="log-notice" class="hidden px-5 py-1.5 text-xs text-yellow-300 bg-yellow-950/50 border-b border-yellow-900"></div>
         <pre id="log-content" class="flex-1 overflow-auto px-5 py-4 text-xs font-mono text-gray-300 whitespace-pre-wrap"></pre>
     </div>
 </div>
 
 <!-- Browse Modal -->
-<div id="browse-modal" class="fixed inset-0 z-40 hidden flex items-center justify-center modal-bg" onclick="if(event.target===this)closeBrowseModal()">
+<div id="browse-modal" class="fixed inset-0 z-40 hidden flex items-center justify-center modal-bg" role="dialog" aria-modal="true" aria-labelledby="browse-title" onclick="if(event.target===this)closeBrowseModal()">
     <div class="bg-gray-900 rounded-lg border border-gray-700 w-full max-w-lg max-h-[80vh] flex flex-col mx-4">
         <div class="flex items-center justify-between px-5 py-3 border-b border-gray-800">
-            <h3 class="font-semibold text-sm">Select Working Directory</h3>
+            <h3 id="browse-title" class="font-semibold text-sm">Select Working Directory</h3>
             <button onclick="closeBrowseModal()" class="text-gray-500 hover:text-gray-300 text-xl">&times;</button>
         </div>
         <div id="browse-breadcrumb" class="px-5 py-2 text-xs text-gray-400 border-b border-gray-800 flex items-center gap-1 overflow-x-auto"></div>
@@ -174,7 +194,7 @@
 </div>
 
 <!-- Fan Control Modal -->
-<div id="fan-modal" class="fixed inset-0 z-40 hidden flex items-center justify-center modal-bg" onclick="if(event.target===this)closeFanModal()">
+<div id="fan-modal" class="fixed inset-0 z-40 hidden flex items-center justify-center modal-bg" role="dialog" aria-modal="true" aria-labelledby="fan-modal-title" onclick="if(event.target===this)closeFanModal()">
     <div class="bg-gray-900 rounded-lg border border-gray-700 w-full max-w-sm mx-4">
         <div class="flex items-center justify-between px-5 py-3 border-b border-gray-800">
             <h3 id="fan-modal-title" class="font-semibold text-sm">Fan Control</h3>
@@ -208,7 +228,7 @@
         </div>
         <div class="flex items-center justify-end gap-2 px-5 py-3 border-t border-gray-800">
             <button onclick="closeFanModal()" class="bg-gray-700 hover:bg-gray-600 text-gray-300 px-3 py-1.5 rounded text-xs transition">Close</button>
-            <button onclick="applyFanConfig()" class="bg-blue-600 hover:bg-blue-500 text-white px-3 py-1.5 rounded text-xs transition">Apply</button>
+            <button id="fan-apply" onclick="applyFanConfig()" class="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white px-3 py-1.5 rounded text-xs transition">Apply</button>
         </div>
     </div>
 </div>
@@ -221,6 +241,17 @@ let currentUser = localStorage.getItem('rl-scheduler-user') || '';
 let cachedGpus = [];
 let adminPassword = '';
 let expandedCommands = new Set();
+let taskPage = 0;
+const taskPageSize = 100;
+let taskTotal = 0;
+let taskSearch = '';
+let taskScope = 'all';
+let taskById = new Map();
+let refreshInFlight = false;
+let logState = null;
+let logTimer = null;
+let userHomes = {};
+let modalReturnFocus = null;
 
 function getSelectedUser() {
     return document.getElementById('user-selector').value || currentUser;
@@ -248,7 +279,8 @@ function toggleForm() {
 
 // --- API helpers ---
 async function apiFetch(path, opts = {}) {
-    const res = await fetch(API + path, { headers: { 'Content-Type': 'application/json' }, ...opts });
+    const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
+    const res = await fetch(API + path, { ...opts, headers });
     const text = await res.text();
     let data;
     try { data = JSON.parse(text); } catch { data = null; }
@@ -258,6 +290,12 @@ async function apiFetch(path, opts = {}) {
         throw new Error(msg);
     }
     return data;
+}
+
+function withAdmin(opts = {}) {
+    const pw = getAdminPassword();
+    if (pw === null) return null;
+    return { ...opts, headers: { ...(opts.headers || {}), 'X-Admin-Password': pw } };
 }
 
 function getAdminPassword() {
@@ -274,11 +312,14 @@ async function refreshHealth() {
         const h = await apiFetch('/health');
         const dot = document.querySelector('#health-indicator span:first-child');
         const label = document.querySelector('#health-indicator span:last-child');
-        dot.className = 'w-2 h-2 rounded-full bg-green-400 pulse-dot';
-        label.className = 'text-green-400 text-sm';
-        label.textContent = 'System OK';
+        dot.className = h.supervisor_available
+            ? 'w-2 h-2 rounded-full bg-green-400 pulse-dot'
+            : 'w-2 h-2 rounded-full bg-yellow-400';
+        label.className = h.supervisor_available ? 'text-green-400 text-sm' : 'text-yellow-400 text-sm';
+        label.textContent = h.supervisor_available ? 'System OK' : 'Supervisor unavailable';
         document.getElementById('stat-gpus').textContent = `${h.gpus_managed} GPUs`;
         document.getElementById('stat-running').textContent = `${h.tasks_running} Running`;
+        document.getElementById('stat-starting').textContent = `${h.tasks_starting} Starting`;
         document.getElementById('stat-pending').textContent = `${h.tasks_pending} Pending`;
     } catch {
         const dot = document.querySelector('#health-indicator span:first-child');
@@ -341,7 +382,8 @@ async function refreshGpus() {
 // --- Users ---
 async function loadUsers() {
     try {
-        const { users } = await apiFetch('/users');
+        const { users, home_directories } = await apiFetch('/users');
+        userHomes = home_directories || {};
         const sel = document.getElementById('user-selector');
         sel.innerHTML = '<option value="">Select user...</option>' +
             users.map(u => `<option value="${escapeHtml(u)}" ${u === currentUser ? 'selected' : ''}>${escapeHtml(u)}</option>`).join('');
@@ -363,8 +405,14 @@ function onUserChange(username) {
     if (username) {
         loadWorkdirs(username);
         loadCondaEnvs(username);
-        loadVenvs('/home/' + username, username);
+        loadVenvs(userHomes[username] || '/home/' + username, username);
+    } else {
+        currentCondaEnvs = [];
+        currentVenvs = [];
+        document.getElementById('f-workdir').innerHTML = '<option value=".">.</option>';
+        rebuildEnvDropdown();
     }
+    if (taskScope === 'selected') { taskPage = 0; refreshTasks(); }
 }
 
 // --- Workdirs ---
@@ -372,8 +420,10 @@ async function loadWorkdirs(username) {
     if (!username) return;
     try {
         const { directories } = await apiFetch('/workdirs/' + encodeURIComponent(username));
+        if (username !== getSelectedUser()) return;
         const sel = document.getElementById('f-workdir');
-        const opts = ['<option value=".">.</option>'] +
+        const home = userHomes[username] || '/home/' + username;
+        const opts = [`<option value="${escapeHtml(home)}">${escapeHtml(home)}</option>`] +
             directories.map(d => `<option value="${escapeHtml(d)}">${escapeHtml(d)}</option>`).join('') +
             '<option value="__custom__">Custom...</option>';
         sel.innerHTML = opts;
@@ -391,7 +441,7 @@ document.getElementById('f-workdir').addEventListener('change', function() {
         custom.classList.add('hidden');
         const user = getSelectedUser();
         if (user && this.value) {
-            const workdir = this.value === '.' ? '/home/' + user : this.value;
+            const workdir = this.value === '.' ? (userHomes[user] || '/home/' + user) : this.value;
             loadVenvs(workdir, user);
         }
     }
@@ -433,6 +483,7 @@ async function loadCondaEnvs(username) {
     if (!username) return;
     try {
         const { environments } = await apiFetch('/conda/envs/' + encodeURIComponent(username));
+        if (username !== getSelectedUser()) return;
         currentCondaEnvs = environments;
     } catch (e) {
         currentCondaEnvs = [];
@@ -446,6 +497,7 @@ async function loadVenvs(workdir, username) {
     try {
         const qs = '?path=' + encodeURIComponent(workdir) + '&username=' + encodeURIComponent(username);
         const { venvs } = await apiFetch('/envs/scan-venvs' + qs);
+        if (username !== getSelectedUser()) return;
         currentVenvs = venvs;
     } catch {
         currentVenvs = [];
@@ -454,14 +506,23 @@ async function loadVenvs(workdir, username) {
 }
 
 // --- Task list ---
-function stateBadge(state) {
+function stateBadge(state, reason = null) {
     const colors = {
         PENDING: 'bg-yellow-900 text-yellow-300',
+        STARTING: 'bg-purple-900 text-purple-300 badge-running',
         RUNNING: 'bg-blue-900 text-blue-300 badge-running',
         COMPLETED: 'bg-green-900 text-green-300',
         FAILED: 'bg-red-900 text-red-300',
     };
-    return `<span class="px-2 py-0.5 rounded text-xs font-medium ${colors[state] || 'bg-gray-800 text-gray-400'}">${state}</span>`;
+    const title = reason ? ` title="${escapeHtml(reason)}"` : '';
+    return `<span class="px-2 py-0.5 rounded text-xs font-medium ${colors[state] || 'bg-gray-800 text-gray-400'}"${title}>${escapeHtml(state)}</span>`;
+}
+
+function stateCell(t) {
+    const detail = t.status_reason
+        ? `<div class="text-[10px] text-gray-500 mt-1 max-w-24 truncate" title="${escapeHtml(t.status_reason)}">${escapeHtml(t.status_reason.replaceAll('_', ' '))}</div>`
+        : '';
+    return `<div class="flex flex-col items-center">${stateBadge(t.state, t.status_reason)}${detail}</div>`;
 }
 
 function formatDuration(d) {
@@ -472,9 +533,10 @@ function formatDuration(d) {
 }
 
 function progressCell(t) {
+    if (t.state === 'STARTING') return '<span class="text-purple-300 italic">Starting supervisor...</span>';
     if (t.state !== 'RUNNING') return '<span class="text-gray-600">--</span>';
     if (t.progress == null) return '<span class="text-gray-500 italic">unsupported</span>';
-    const pct = Math.round(t.progress * 100);
+    const pct = Math.max(0, Math.min(100, Math.round(t.progress * 100)));
     const eta = t.eta != null ? formatDuration(t.eta) : '--';
     return `<div class="flex items-center gap-2">
         <div class="flex-1 h-1.5 bg-gray-700 rounded-full overflow-hidden">
@@ -485,12 +547,10 @@ function progressCell(t) {
 }
 
 function buildActionsCell(t) {
-    const u = escapeAttr(t.username || '');
     return `
-        ${t.state === 'RUNNING' ? `<button onclick="viewLog('${t.id}', '${escapeAttr(t.command)}', null, null)" class="bg-gray-700 hover:bg-gray-600 text-gray-300 px-2.5 py-1 rounded text-xs transition mr-1">Log</button>` : ''}
-        ${t.state === 'RUNNING' || t.state === 'PENDING' ? `<button onclick="abortTask('${t.id}', '${u}')" class="bg-red-600/80 hover:bg-red-500 text-white px-2.5 py-1 rounded text-xs transition">Abort</button>` : ''}
-        ${t.state === 'COMPLETED' || t.state === 'FAILED' ? `<button onclick="viewLog('${t.id}', '${escapeAttr(t.command)}', ${t.exit_code}, ${t.duration})" class="bg-gray-700 hover:bg-gray-600 text-gray-300 px-2.5 py-1 rounded text-xs transition mr-1">Log</button>` : ''}
-        ${t.state === 'COMPLETED' || t.state === 'FAILED' ? `<button onclick="deleteTask('${t.id}', '${u}')" class="bg-red-600/80 hover:bg-red-500 text-white px-2.5 py-1 rounded text-xs transition">Delete</button>` : ''}`;
+        ${t.state !== 'PENDING' ? `<button data-action="log" data-task-id="${t.id}" class="bg-gray-700 hover:bg-gray-600 text-gray-300 px-2.5 py-1 rounded text-xs transition mr-1">Log</button>` : ''}
+        ${t.state === 'RUNNING' || t.state === 'STARTING' || t.state === 'PENDING' ? `<button data-action="abort" data-task-id="${t.id}" class="bg-red-600/80 hover:bg-red-500 text-white px-2.5 py-1 rounded text-xs transition">Abort</button>` : ''}
+        ${t.state === 'COMPLETED' || t.state === 'FAILED' ? `<button data-action="delete" data-task-id="${t.id}" class="bg-red-600/80 hover:bg-red-500 text-white px-2.5 py-1 rounded text-xs transition">Delete</button>` : ''}`;
 }
 
 function buildTaskRow(t) {
@@ -500,12 +560,12 @@ function buildTaskRow(t) {
     const chevron = expanded ? '&#9650;' : '&#9660;';
     return `
         <tr data-task-id="${t.id}" data-state="${t.state}" class="border-b border-gray-800 hover:bg-gray-800/50 transition">
-            <td class="px-4 py-2.5 font-mono text-xs text-gray-400">${t.id}</td>
-            <td class="px-4 py-2.5 text-xs text-gray-300">${t.username || '--'}</td>
-            <td class="${tdClass} flex items-center gap-1" data-cmd-td><span class="${spanClass} flex-1 min-w-0" data-cmd-text>${escapeHtml(t.command)}</span> <button onclick="toggleCommand(this, '${t.id}')" class="text-gray-500 hover:text-gray-300 text-xs flex-shrink-0" title="Expand/collapse">${chevron}</button></td>
+            <td class="px-4 py-2.5 font-mono text-xs text-gray-400">${escapeHtml(t.id)}</td>
+            <td class="px-4 py-2.5 text-xs text-gray-300">${escapeHtml(t.username || '--')}</td>
+            <td class="${tdClass} flex items-center gap-1" data-cmd-td><span class="${spanClass} flex-1 min-w-0" data-cmd-text>${escapeHtml(t.command)}</span> <button data-action="toggle-command" data-task-id="${t.id}" class="text-gray-500 hover:text-gray-300 text-xs flex-shrink-0" title="Expand/collapse">${chevron}</button></td>
             <td class="px-4 py-2.5 text-xs">${t.gpu_id != null ? 'GPU ' + t.gpu_id : '--'}</td>
             <td class="px-4 py-2.5 text-center text-xs">${t.priority}</td>
-            <td data-cell="state" class="px-4 py-2.5 text-center">${stateBadge(t.state)}</td>
+            <td data-cell="state" class="px-4 py-2.5 text-center">${stateCell(t)}</td>
             <td data-cell="duration" class="px-4 py-2.5 text-right text-xs text-gray-400">${formatDuration(t.duration)}</td>
             <td data-cell="progress" class="px-4 py-2.5 text-xs">${progressCell(t)}</td>
             <td data-cell="actions" class="px-4 py-2.5 text-right whitespace-nowrap">${buildActionsCell(t)}</td>
@@ -514,7 +574,7 @@ function buildTaskRow(t) {
 
 function updateTaskRow(row, t) {
     row.dataset.state = t.state;
-    row.querySelector('[data-cell="state"]').innerHTML = stateBadge(t.state);
+    row.querySelector('[data-cell="state"]').innerHTML = stateCell(t);
     row.querySelector('[data-cell="duration"]').textContent = formatDuration(t.duration);
     row.querySelector('[data-cell="progress"]').innerHTML = progressCell(t);
     row.querySelector('[data-cell="actions"]').innerHTML = buildActionsCell(t);
@@ -522,8 +582,20 @@ function updateTaskRow(row, t) {
 
 async function refreshTasks() {
     try {
-        const qs = currentFilter ? `?state=${currentFilter}` : '';
-        const { tasks } = await apiFetch('/tasks/status' + qs);
+        const params = new URLSearchParams({ limit: taskPageSize, offset: taskPage * taskPageSize });
+        if (currentFilter) params.set('state', currentFilter);
+        if (taskSearch) params.set('q', taskSearch);
+        const selectedUser = getSelectedUser();
+        if (taskScope === 'selected' && selectedUser) params.set('username', selectedUser);
+        const result = await apiFetch('/tasks/status?' + params.toString());
+        const tasks = result.tasks;
+        taskTotal = result.total;
+        taskById = new Map(tasks.map(t => [t.id, t]));
+        if (logState && taskById.has(logState.taskId) && !['STARTING', 'RUNNING'].includes(taskById.get(logState.taskId).state)) {
+            logState.running = false;
+            clearInterval(logTimer);
+            logTimer = null;
+        }
         const tbody = document.getElementById('task-tbody');
 
         // Remove non-task rows (e.g. "Loading..." placeholder)
@@ -533,6 +605,7 @@ async function refreshTasks() {
 
         if (!tasks.length) {
             tbody.innerHTML = `<tr><td colspan="9" class="px-4 py-8 text-center text-gray-500">No tasks${currentFilter ? ' with state ' + currentFilter : ''}</td></tr>`;
+            updatePagination();
             return;
         }
 
@@ -555,13 +628,24 @@ async function refreshTasks() {
             if (!existingIds.has(t.id)) {
                 tbody.insertAdjacentHTML('beforeend', buildTaskRow(t));
             }
+            const row = tbody.querySelector(`tr[data-task-id="${t.id}"]`);
+            if (row) tbody.appendChild(row);
         }
 
         // Prune expanded state for tasks no longer in the list
         for (const id of expandedCommands) {
             if (!newById.has(id)) expandedCommands.delete(id);
         }
+        updatePagination();
     } catch (e) { console.error('Task refresh failed:', e); }
+}
+
+function updatePagination() {
+    const first = taskTotal ? taskPage * taskPageSize + 1 : 0;
+    const last = Math.min((taskPage + 1) * taskPageSize, taskTotal);
+    document.getElementById('task-page-summary').textContent = taskTotal ? `${first}–${last} of ${taskTotal}` : '0 tasks';
+    document.getElementById('task-prev').disabled = taskPage === 0;
+    document.getElementById('task-next').disabled = last >= taskTotal;
 }
 
 function escapeHtml(s) {
@@ -589,6 +673,7 @@ function toggleCommand(btn, taskId) {
 // --- Filter tabs ---
 function setFilter(state) {
     currentFilter = state;
+    taskPage = 0;
     document.querySelectorAll('.filter-tab').forEach(btn => {
         const isActive = (state === null && btn.textContent === 'All') || btn.textContent.toUpperCase() === state;
         btn.className = isActive
@@ -597,6 +682,48 @@ function setFilter(state) {
     });
     refreshTasks();
 }
+
+let searchTimer = null;
+document.getElementById('task-search').addEventListener('input', event => {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => {
+        taskSearch = event.target.value.trim();
+        taskPage = 0;
+        refreshTasks();
+    }, 250);
+});
+document.getElementById('task-scope').addEventListener('change', event => {
+    taskScope = event.target.value;
+    if (taskScope === 'selected' && !getSelectedUser()) {
+        showToast('Select a user before using selected-user scope', 'error');
+        taskScope = 'all';
+        event.target.value = 'all';
+    }
+    taskPage = 0;
+    refreshTasks();
+});
+document.getElementById('task-prev').addEventListener('click', () => {
+    if (taskPage > 0) { taskPage -= 1; refreshTasks(); }
+});
+document.getElementById('task-next').addEventListener('click', () => {
+    if ((taskPage + 1) * taskPageSize < taskTotal) { taskPage += 1; refreshTasks(); }
+});
+
+document.getElementById('task-tbody').addEventListener('click', async event => {
+    const button = event.target.closest('button[data-action]');
+    if (!button) return;
+    const task = taskById.get(button.dataset.taskId);
+    if (!task) return;
+    if (button.dataset.action === 'toggle-command') { toggleCommand(button, task.id); return; }
+    button.disabled = true;
+    try {
+        if (button.dataset.action === 'log') await viewLog(task.id);
+        if (button.dataset.action === 'abort') await abortTask(task.id, task.username);
+        if (button.dataset.action === 'delete') await deleteTask(task.id, task.username);
+    } finally {
+        button.disabled = false;
+    }
+});
 
 // --- Submit ---
 async function handleSubmit(e) {
@@ -631,6 +758,8 @@ async function handleSubmit(e) {
         preferred_gpu_id: gpuVal !== '' ? parseInt(gpuVal) : null,
         priority: parseInt(document.getElementById('f-priority').value) || 0,
     };
+    const button = document.getElementById('submit-button');
+    button.disabled = true;
     try {
         const { task_id } = await apiFetch('/tasks/submit', { method: 'POST', body: JSON.stringify(body) });
         showToast(`Task ${task_id} submitted`, 'success');
@@ -638,6 +767,8 @@ async function handleSubmit(e) {
         refreshTasks();
     } catch (err) {
         showToast(err.message, 'error');
+    } finally {
+        button.disabled = false;
     }
 }
 
@@ -650,15 +781,15 @@ async function abortTask(task_id, taskUsername) {
     } else if (!confirm(`Abort task ${task_id}?`)) return;
     try {
         const params = new URLSearchParams();
+        let opts = { method: 'POST' };
         if (isCrossUser || !user) {
-            const pw = getAdminPassword();
-            if (pw === null) return;
-            params.set('admin_password', pw);
+            opts = withAdmin(opts);
+            if (opts === null) return;
         } else {
             params.set('username', user);
         }
         const qs = params.toString() ? '?' + params.toString() : '';
-        await apiFetch(`/tasks/${task_id}/abort` + qs, { method: 'POST' });
+        await apiFetch(`/tasks/${task_id}/abort` + qs, opts);
         adminPassword = '';
         showToast(`Task ${task_id} aborted`, 'info');
         refreshTasks();
@@ -675,15 +806,15 @@ async function deleteTask(task_id, taskUsername) {
     } else if (!confirm(`Delete task ${task_id}? This removes the log file.`)) return;
     try {
         const params = new URLSearchParams();
+        let opts = { method: 'DELETE' };
         if (isCrossUser || !user) {
-            const pw = getAdminPassword();
-            if (pw === null) return;
-            params.set('admin_password', pw);
+            opts = withAdmin(opts);
+            if (opts === null) return;
         } else {
             params.set('username', user);
         }
         const qs = params.toString() ? '?' + params.toString() : '';
-        await apiFetch(`/tasks/${task_id}` + qs, { method: 'DELETE' });
+        await apiFetch(`/tasks/${task_id}` + qs, opts);
         adminPassword = '';
         showToast(`Task ${task_id} deleted`, 'info');
         refreshTasks();
@@ -700,14 +831,14 @@ async function deleteAllTasks() {
     if (!confirm(msg)) return;
     try {
         const params = new URLSearchParams();
+        let opts = { method: 'DELETE' };
         if (user) params.set('username', user);
         else {
-            const pw = getAdminPassword();
-            if (pw === null) return;
-            params.set('admin_password', pw);
+            opts = withAdmin(opts);
+            if (opts === null) return;
         }
         const qs = params.toString() ? '?' + params.toString() : '';
-        const { deleted } = await apiFetch('/tasks' + qs, { method: 'DELETE' });
+        const { deleted } = await apiFetch('/tasks' + qs, opts);
         adminPassword = '';
         showToast(`Deleted ${deleted} task(s)`, 'info');
         refreshTasks();
@@ -717,36 +848,96 @@ async function deleteAllTasks() {
 }
 
 // --- Log modal ---
-async function viewLog(task_id, command, exit_code, duration) {
-    document.getElementById('log-meta').textContent = `${task_id} | ${command} | exit: ${exit_code} | ${formatDuration(duration)}`;
+async function viewLog(task_id) {
+    const task = taskById.get(task_id);
+    if (!task) return;
+    logState = { taskId: task_id, offset: 0, running: ['STARTING', 'RUNNING'].includes(task.state) };
+    modalReturnFocus = document.activeElement;
+    document.getElementById('log-meta').textContent = `${task_id} | ${task.command} | exit: ${task.exit_code ?? '--'} | ${formatDuration(task.duration)}`;
     document.getElementById('log-content').textContent = 'Loading...';
+    document.getElementById('log-notice').classList.add('hidden');
     document.getElementById('log-modal').classList.remove('hidden');
+    document.getElementById('log-refresh').focus();
+    await loadLogTail();
+    clearInterval(logTimer);
+    if (logState && logState.running) logTimer = setInterval(refreshOpenLog, 2000);
+}
+
+async function loadLogTail() {
+    if (!logState) return;
     try {
-        const res = await fetch(`${API}/tasks/${task_id}/log`);
+        const res = await fetch(`${API}/tasks/${logState.taskId}/log?tail_bytes=131072`);
         if (!res.ok) throw new Error('Log not found');
-        document.getElementById('log-content').textContent = await res.text();
+        const content = document.getElementById('log-content');
+        content.textContent = await res.text();
+        logState.offset = parseInt(res.headers.get('X-Log-Next-Offset') || '0');
+        const notice = document.getElementById('log-notice');
+        const truncated = res.headers.get('X-Log-Truncated') === 'true';
+        notice.textContent = truncated ? 'Showing the latest 128 KiB of this log.' : '';
+        notice.classList.toggle('hidden', !truncated);
+        if (document.getElementById('log-autoscroll').checked) content.scrollTop = content.scrollHeight;
     } catch (e) {
         document.getElementById('log-content').textContent = 'Failed to load log: ' + e.message;
     }
 }
 
-function closeLogModal() {
-    document.getElementById('log-modal').classList.add('hidden');
+async function refreshOpenLog() {
+    if (!logState) return;
+    try {
+        const res = await fetch(`${API}/tasks/${logState.taskId}/log?offset=${logState.offset}&limit_bytes=262144`);
+        if (!res.ok) throw new Error('Log not found');
+        const totalSize = parseInt(res.headers.get('X-Log-Size') || '0');
+        if (totalSize < logState.offset) { await loadLogTail(); return; }
+        const chunk = await res.text();
+        const content = document.getElementById('log-content');
+        const nearBottom = content.scrollHeight - content.scrollTop - content.clientHeight < 48;
+        if (chunk) content.textContent += chunk;
+        if (content.textContent.length > 524288) {
+            content.textContent = content.textContent.slice(-524288);
+            const notice = document.getElementById('log-notice');
+            notice.textContent = 'Older log output was trimmed from this live view.';
+            notice.classList.remove('hidden');
+        }
+        logState.offset = parseInt(res.headers.get('X-Log-Next-Offset') || String(logState.offset));
+        if (document.getElementById('log-autoscroll').checked && nearBottom) content.scrollTop = content.scrollHeight;
+    } catch (e) {
+        console.error('Log refresh failed:', e);
+    }
 }
 
-document.addEventListener('keydown', e => { if (e.key === 'Escape') closeLogModal(); });
+function closeLogModal() {
+    document.getElementById('log-modal').classList.add('hidden');
+    clearInterval(logTimer);
+    logTimer = null;
+    logState = null;
+    if (modalReturnFocus) modalReturnFocus.focus();
+    modalReturnFocus = null;
+}
+
+document.getElementById('log-refresh').addEventListener('click', loadLogTail);
+document.getElementById('log-copy').addEventListener('click', async () => {
+    await navigator.clipboard.writeText(document.getElementById('log-content').textContent);
+    showToast('Log copied', 'success');
+});
+document.getElementById('log-modal').addEventListener('click', event => {
+    if (event.target === event.currentTarget) closeLogModal();
+});
 
 // --- Polling ---
 function startPolling() {
-    refreshHealth();
-    refreshGpus();
-    refreshTasks();
-    pollingInterval = setInterval(() => {
-        refreshHealth();
-        refreshGpus();
-        refreshTasks();
+    refreshDashboard();
+    pollingInterval = setInterval(refreshDashboard, 3000);
+}
+
+async function refreshDashboard() {
+    if (refreshInFlight) return;
+    refreshInFlight = true;
+    try {
+        await Promise.allSettled([refreshHealth(), refreshGpus(), refreshTasks()]);
         document.getElementById('last-updated').textContent = new Date().toLocaleTimeString();
-    }, 3000);
+    } finally {
+        refreshInFlight = false;
+    }
 }
 
 document.addEventListener('visibilitychange', () => {
@@ -775,7 +966,7 @@ function closeBrowseModal() {
 async function loadBrowseDir(path) {
     const user = getSelectedUser();
     browsePath = path;
-    browseSelected = '/home/' + user + (path ? '/' + path : '');
+    browseSelected = (userHomes[user] || '/home/' + user) + (path ? '/' + path : '');
     document.getElementById('browse-selected').textContent = browseSelected;
     renderBreadcrumb(path);
 
@@ -790,10 +981,10 @@ async function loadBrowseDir(path) {
         }
         list.innerHTML = directories.map(d => {
             const name = escapeHtml(d.split('/').pop());
-            return `<div class="flex items-center gap-2 px-3 py-2 rounded hover:bg-gray-800 cursor-pointer transition" onclick="loadBrowseDir('${escapeAttr(d)}')">
+            return `<button type="button" data-browse-path="${escapeHtml(d)}" class="w-full flex items-center gap-2 px-3 py-2 rounded hover:bg-gray-800 cursor-pointer transition text-left">
                 <svg class="w-4 h-4 text-yellow-500 flex-shrink-0" fill="currentColor" viewBox="0 0 20 20"><path d="M2 6a2 2 0 012-2h5l2 2h5a2 2 0 012 2v6a2 2 0 01-2 2H4a2 2 0 01-2-2V6z"/></svg>
                 <span class="text-sm text-gray-300 font-mono">${name}</span>
-            </div>`;
+            </button>`;
         }).join('');
     } catch (e) {
         list.innerHTML = '<div class="text-red-400 text-sm text-center py-4">' + escapeHtml(e.message) + '</div>';
@@ -804,15 +995,20 @@ function renderBreadcrumb(path) {
     const user = getSelectedUser();
     const bc = document.getElementById('browse-breadcrumb');
     const parts = path ? path.split('/') : [];
-    let html = `<span class="cursor-pointer hover:text-blue-400 ${!path ? 'text-blue-400' : ''}" onclick="loadBrowseDir('')">${escapeHtml(user)}</span>`;
+    let html = `<button type="button" data-browse-path="" class="hover:text-blue-400 ${!path ? 'text-blue-400' : ''}">${escapeHtml(user)}</button>`;
     let accumulated = '';
     for (const part of parts) {
         accumulated += (accumulated ? '/' : '') + part;
         const p = accumulated;
-        html += ` <span class="text-gray-600">/</span> <span class="cursor-pointer hover:text-blue-400 ${p === path ? 'text-blue-400' : ''}" onclick="loadBrowseDir('${escapeAttr(p)}')">${escapeHtml(part)}</span>`;
+        html += ` <span class="text-gray-600">/</span> <button type="button" data-browse-path="${escapeHtml(p)}" class="hover:text-blue-400 ${p === path ? 'text-blue-400' : ''}">${escapeHtml(part)}</button>`;
     }
     bc.innerHTML = html;
 }
+
+document.getElementById('browse-modal').addEventListener('click', event => {
+    const target = event.target.closest('[data-browse-path]');
+    if (target) loadBrowseDir(target.dataset.browsePath);
+});
 
 function confirmBrowseSelection() {
     if (!browseSelected) { showToast('No directory selected', 'error'); return; }
@@ -835,8 +1031,6 @@ function confirmBrowseSelection() {
     const user = getSelectedUser();
     if (user) loadVenvs(browseSelected, user);
 }
-
-document.addEventListener('keydown', e => { if (e.key === 'Escape') closeBrowseModal(); });
 
 // --- Fan control modal ---
 let fanModalGpuId = null;
@@ -884,17 +1078,29 @@ async function applyFanConfig() {
     if (fanModalMode === 'manual') {
         body.speed = parseInt(document.getElementById('fan-speed-slider').value);
     }
+    const button = document.getElementById('fan-apply');
+    button.disabled = true;
     try {
-        await apiFetch(`/gpus/${fanModalGpuId}/fan`, { method: 'POST', body: JSON.stringify(body) });
+        const opts = withAdmin({ method: 'POST', body: JSON.stringify(body) });
+        if (opts === null) return;
+        await apiFetch(`/gpus/${fanModalGpuId}/fan`, opts);
+        adminPassword = '';
         showToast(`GPU ${fanModalGpuId} fan set to ${fanModalMode}${fanModalMode === 'manual' ? ' (' + body.speed + '%)' : ''}`, 'success');
         closeFanModal();
         refreshGpus();
     } catch (err) {
         showToast(err.message, 'error');
+    } finally {
+        button.disabled = false;
     }
 }
 
-document.addEventListener('keydown', e => { if (e.key === 'Escape') closeFanModal(); });
+document.addEventListener('keydown', event => {
+    if (event.key !== 'Escape') return;
+    if (!document.getElementById('log-modal').classList.contains('hidden')) closeLogModal();
+    else if (!document.getElementById('browse-modal').classList.contains('hidden')) closeBrowseModal();
+    else if (!document.getElementById('fan-modal').classList.contains('hidden')) closeFanModal();
+});
 
 // --- Init ---
 loadUsers();

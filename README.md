@@ -10,7 +10,7 @@ A GPU workload manager that prevents resource contention on multi-GPU machines. 
 - **Python environment support** — conda and venv, with automatic python binary resolution
 - **Manual GPU selection** — pin a task to a specific GPU or let the scheduler auto-assign
 - **Persistent queue** — SQLite-backed task state survives server restarts
-- **Crash recovery** — orphaned tasks from a previous crash are marked `FAILED` on startup
+- **Restart-safe execution** — systemd-managed jobs keep running while the app is closed and are reconciled on restart
 - **Live dashboard** — web UI with GPU monitoring, task submission, log viewing, and abort
 - **Process group management** — abort kills the entire process tree, not just the parent
 - **Live log viewing** — view stdout/stderr while a task is still running
@@ -35,8 +35,12 @@ rl-scheduler/
 ├── models.py         # Pydantic models, SQLite schema, DB helpers
 ├── scheduler.py      # Async orchestrator loop, task dispatch, subprocess management
 ├── hardware.py       # pynvml GPU telemetry and availability checks
+├── environments.py   # System-user and Python environment resolution
+├── systemd_runner.py # Persistent transient-service execution backend
 ├── requirements.txt  # Python dependencies
+├── requirements-dev.txt # Test dependencies
 ├── start.sh          # Convenience launcher (sudo python3 main.py)
+├── tests/             # pytest API, database, and scheduler tests
 ├── static/
 │   └── index.html    # Single-page dashboard (Tailwind CSS + vanilla JS)
 ├── doc/
@@ -49,13 +53,21 @@ rl-scheduler/
 
 - Python 3.10+
 - NVIDIA GPU with drivers installed
-- `nvidia-smi` working (for pynvml)
+- `nvidia-smi` working (through the `nvidia-ml-py` NVML bindings)
+- systemd system manager access (the server normally runs as root)
 - conda (optional, only needed if using `conda_env`)
 
 ## Installation
 
 ```bash
 pip install -r requirements.txt
+```
+
+For development and tests:
+
+```bash
+pip install -r requirements-dev.txt
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 pytest -q
 ```
 
 ## Usage
@@ -89,11 +101,11 @@ curl http://localhost:8000/gpus
 | Method | Path | Description |
 |--------|------|-------------|
 | `POST` | `/tasks/submit` | Submit a new task |
-| `GET`  | `/tasks/status` | List tasks (optional `?state=` and `?username=` filters) |
-| `POST` | `/tasks/{task_id}/abort` | Force-kill a running or pending task (`?username=` and `?admin_password=`) |
-| `GET`  | `/tasks/{task_id}/log` | Get task log output (works while running) |
-| `DELETE` | `/tasks` | Delete all completed/failed tasks (`?username=` or `?admin_password=`) |
-| `DELETE` | `/tasks/{task_id}` | Delete a single completed/failed task (`?username=` or `?admin_password=`) |
+| `GET`  | `/tasks/status` | List tasks (`state`, `username`, `q`, `limit`, and `offset` are optional) |
+| `POST` | `/tasks/{task_id}/abort` | Force-kill a running or pending task (`username` or `X-Admin-Password`) |
+| `GET`  | `/tasks/{task_id}/log` | Get a full log or bounded/incremental output with `tail_bytes` or `offset` |
+| `DELETE` | `/tasks` | Delete completed/failed tasks (`username` or `X-Admin-Password`) |
+| `DELETE` | `/tasks/{task_id}` | Delete one completed/failed task (`username` or `X-Admin-Password`) |
 | `GET`  | `/gpus` | Live GPU telemetry (temp, VRAM, active task, external process count, fan status) |
 | `POST` | `/gpus/{gpu_id}/fan` | Set fan mode and speed (`{"mode": "auto"}` or `{"mode": "manual", "speed": 50}`) |
 | `GET`  | `/users` | List system users (uid ≥ 1000 with valid home dir) |
@@ -150,13 +162,17 @@ curl "http://localhost:8000/tasks/status?state=RUNNING&username=alice"
 curl -X POST "http://localhost:8000/tasks/{task_id}/abort?username=your-user"
 
 # Abort as admin (no user selected — requires admin password)
-curl -X POST "http://localhost:8000/tasks/{task_id}/abort?admin_password=your-admin-password"
+curl -X POST http://localhost:8000/tasks/{task_id}/abort \
+  -H "X-Admin-Password: your-admin-password"
 ```
 
 ### View task logs
 
 ```bash
 curl http://localhost:8000/tasks/{task_id}/log
+
+# Last 128 KiB (response headers include the next byte offset)
+curl "http://localhost:8000/tasks/{task_id}/log?tail_bytes=131072"
 ```
 
 Works while the task is running — output is streamed to the log file in real time.
@@ -164,19 +180,20 @@ Works while the task is running — output is streamed to the log file in real t
 ## Task Lifecycle
 
 ```
-PENDING  ──dispatch──>  RUNNING  ──exit 0──>  COMPLETED
-    │                       │
-    └──abort──────────────> FAILED
+PENDING ──claim──> STARTING ──unit active──> RUNNING ──exit 0──> COMPLETED
+   │                 │                         │
+   └─────────────────┴────abort/failure────────┴──────────────> FAILED
 ```
 
 - **PENDING** — queued, waiting for a free GPU
-- **RUNNING** — subprocess is active on an assigned GPU
+- **STARTING** — GPU and systemd unit are assigned and the service is activating
+- **RUNNING** — systemd service is active on an assigned GPU
 - **COMPLETED** — subprocess exited with code 0
 - **FAILED** — subprocess exited with a non-zero code, or was aborted
 
 ## GPU Isolation
 
-Each task gets `CUDA_DEVICE_ORDER=PCI_BUS_ID` and `CUDA_VISIBLE_DEVICES=<gpu_id>` injected into its environment. This makes the assigned GPU appear as device 0 to the training script, fully isolating it from other GPUs and other tasks.
+Each task gets `CUDA_DEVICE_ORDER=PCI_BUS_ID` and `CUDA_VISIBLE_DEVICES=<gpu-uuid>` injected into its environment. UUIDs keep the physical GPU assignment stable even when NVML and CUDA ordinal ordering differ; the assigned GPU appears as device 0 to the training script.
 
 A GPU is considered "available" when:
 1. No scheduler-managed task is currently running on it
@@ -203,18 +220,20 @@ On server shutdown, all fans are reset to automatic mode.
 ```bash
 # Set fan to manual at 70%
 curl -X POST http://localhost:8000/gpus/0/fan \
+  -H "X-Admin-Password: your-admin-password" \
   -H "Content-Type: application/json" \
   -d '{"mode": "manual", "speed": 70}'
 
 # Reset fan to automatic
 curl -X POST http://localhost:8000/gpus/0/fan \
+  -H "X-Admin-Password: your-admin-password" \
   -H "Content-Type: application/json" \
   -d '{"mode": "auto"}'
 ```
 
 ## Admin Password
 
-Set `ADMIN_PASSWORD` in `start.sh` (or as an environment variable) to protect privileged operations:
+Set `ADMIN_PASSWORD` in the environment to protect admin-mode task operations and GPU fan control:
 
 ```bash
 export ADMIN_PASSWORD="your-secret"
@@ -225,9 +244,14 @@ When set:
 - **User-scoped operations** (selecting a user and managing their own tasks) — no password required
 - **Admin mode** (no user selected) — password required for abort, delete, and delete-all
 - **Cross-user operations** (managing another user's tasks) — requires admin credentials
+- **GPU fan control** — always requires admin credentials
 
-If `ADMIN_PASSWORD` is not set, admin-mode operations return 403 (disabled).
+The dashboard sends the credential in `X-Admin-Password`. Existing API clients may continue using the `admin_password` query parameter for compatibility, but headers avoid exposing credentials in URLs.
 
-## Crash Recovery
+If `ADMIN_PASSWORD` is not set, privileged admin and fan operations return 403 (disabled).
 
-If the scheduler crashes while tasks are running, those tasks cannot be reattached (the subprocess handles are lost). On the next startup, any tasks left in `RUNNING` state are automatically transitioned to `FAILED` with `exit_code = -1`.
+## App Restart Recovery
+
+Each dispatched task runs as `rl-scheduler-task-<task_id>.service`, a transient systemd service with retained exit status. Closing or restarting the web app leaves these units running. On startup, the scheduler restores active GPU registrations, continues log/progress tracking, and records tasks that completed while it was offline. Abort explicitly kills the unit's complete control group.
+
+If systemd cannot be queried, `/health` reports `degraded`, existing task states are preserved, dispatch pauses, and new submissions return HTTP 503. Transient units survive app restarts but not a host reboot.
