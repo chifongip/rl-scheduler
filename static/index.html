@@ -33,6 +33,10 @@
         <select id="user-selector" class="bg-gray-800 border border-gray-700 rounded px-2 py-1 text-sm focus:outline-none focus:border-blue-500">
             <option value="">Select user...</option>
         </select>
+        <div id="admin-session" class="hidden items-center gap-1.5 bg-emerald-950 border border-emerald-800 px-2.5 py-1 rounded text-xs text-emerald-300">
+            <span id="admin-session-label">Admin unlocked</span>
+            <button type="button" onclick="lockAdminSession()" class="text-emerald-400 hover:text-white underline">Lock</button>
+        </div>
         <span id="stat-gpus" class="bg-gray-800 px-2.5 py-1 rounded">-- GPUs</span>
         <span id="stat-running" class="bg-gray-800 px-2.5 py-1 rounded">-- Running</span>
         <span id="stat-starting" class="bg-gray-800 px-2.5 py-1 rounded">-- Starting</span>
@@ -239,10 +243,12 @@ let currentFilter = null;
 let pollingInterval = null;
 let currentUser = localStorage.getItem('rl-scheduler-user') || '';
 let cachedGpus = [];
-let adminPassword = '';
+let adminToken = '';
+let adminTokenExpiresAt = 0;
+let adminSessionTimeoutSeconds = 300;
 let expandedCommands = new Set();
 let taskPage = 0;
-const taskPageSize = 100;
+const taskPageSize = 50;
 let taskTotal = 0;
 let taskSearch = '';
 let taskScope = 'all';
@@ -286,24 +292,77 @@ async function apiFetch(path, opts = {}) {
     try { data = JSON.parse(text); } catch { data = null; }
     if (!res.ok) {
         const msg = (data && data.detail) || text || `HTTP ${res.status}`;
-        if (res.status === 403 && msg.toLowerCase().includes('admin')) adminPassword = '';
+        if (res.status === 403 && msg.toLowerCase().includes('admin')) clearAdminSession();
         throw new Error(msg);
     }
     return data;
 }
 
-function withAdmin(opts = {}) {
-    const pw = getAdminPassword();
-    if (pw === null) return null;
-    return { ...opts, headers: { ...(opts.headers || {}), 'X-Admin-Password': pw } };
+async function withAdmin(opts = {}) {
+    const token = await getAdminToken();
+    if (token === null) return null;
+    return { ...opts, headers: { ...(opts.headers || {}), 'X-Admin-Token': token } };
 }
 
-function getAdminPassword() {
-    if (adminPassword) return adminPassword;
-    const pw = prompt('Admin password:');
-    if (pw === null) return null;
-    adminPassword = pw;
-    return pw;
+async function getAdminToken() {
+    if (adminToken && Date.now() < adminTokenExpiresAt) return adminToken;
+    clearAdminSession();
+    let password = prompt('Admin password:');
+    if (password === null) return null;
+    try {
+        const session = await apiFetch('/admin/session', {
+            method: 'POST',
+            body: JSON.stringify({ password }),
+        });
+        adminToken = session.token;
+        adminSessionTimeoutSeconds = session.expires_in;
+        adminTokenExpiresAt = Date.now() + adminSessionTimeoutSeconds * 1000;
+        updateAdminSessionDisplay();
+        return adminToken;
+    } finally {
+        password = '';
+    }
+}
+
+function markAdminActivity() {
+    if (!adminToken) return;
+    adminTokenExpiresAt = Date.now() + adminSessionTimeoutSeconds * 1000;
+    updateAdminSessionDisplay();
+}
+
+function clearAdminSession() {
+    adminToken = '';
+    adminTokenExpiresAt = 0;
+    document.getElementById('admin-session').classList.add('hidden');
+    document.getElementById('admin-session').classList.remove('flex');
+}
+
+function updateAdminSessionDisplay() {
+    if (!adminToken) return;
+    const remaining = Math.ceil((adminTokenExpiresAt - Date.now()) / 1000);
+    if (remaining <= 0) {
+        clearAdminSession();
+        return;
+    }
+    const minutes = Math.floor(remaining / 60);
+    const seconds = String(remaining % 60).padStart(2, '0');
+    document.getElementById('admin-session-label').textContent = `Admin unlocked ${minutes}:${seconds}`;
+    document.getElementById('admin-session').classList.remove('hidden');
+    document.getElementById('admin-session').classList.add('flex');
+}
+
+async function lockAdminSession() {
+    const token = adminToken;
+    clearAdminSession();
+    if (!token) return;
+    try {
+        await apiFetch('/admin/session', {
+            method: 'DELETE',
+            headers: { 'X-Admin-Token': token },
+        });
+    } catch {
+        // The local session is already locked; server expiry handles any failed revoke.
+    }
 }
 
 // --- Health & stats ---
@@ -783,15 +842,15 @@ async function abortTask(task_id, taskUsername) {
         const params = new URLSearchParams();
         let opts = { method: 'POST' };
         if (isCrossUser || !user) {
-            opts = withAdmin(opts);
+            opts = await withAdmin(opts);
             if (opts === null) return;
         } else {
             params.set('username', user);
         }
         const qs = params.toString() ? '?' + params.toString() : '';
-        await apiFetch(`/tasks/${task_id}/abort` + qs, opts);
-        adminPassword = '';
-        showToast(`Task ${task_id} aborted`, 'info');
+        const { success } = await apiFetch(`/tasks/${task_id}/abort` + qs, opts);
+        if (success && (isCrossUser || !user)) markAdminActivity();
+        showToast(success ? `Task ${task_id} aborted` : `Task ${task_id} could not be aborted`, success ? 'info' : 'error');
         refreshTasks();
     } catch (err) {
         showToast(err.message, 'error');
@@ -808,14 +867,14 @@ async function deleteTask(task_id, taskUsername) {
         const params = new URLSearchParams();
         let opts = { method: 'DELETE' };
         if (isCrossUser || !user) {
-            opts = withAdmin(opts);
+            opts = await withAdmin(opts);
             if (opts === null) return;
         } else {
             params.set('username', user);
         }
         const qs = params.toString() ? '?' + params.toString() : '';
         await apiFetch(`/tasks/${task_id}` + qs, opts);
-        adminPassword = '';
+        if (isCrossUser || !user) markAdminActivity();
         showToast(`Task ${task_id} deleted`, 'info');
         refreshTasks();
     } catch (err) {
@@ -834,12 +893,12 @@ async function deleteAllTasks() {
         let opts = { method: 'DELETE' };
         if (user) params.set('username', user);
         else {
-            opts = withAdmin(opts);
+            opts = await withAdmin(opts);
             if (opts === null) return;
         }
         const qs = params.toString() ? '?' + params.toString() : '';
         const { deleted } = await apiFetch('/tasks' + qs, opts);
-        adminPassword = '';
+        if (!user) markAdminActivity();
         showToast(`Deleted ${deleted} task(s)`, 'info');
         refreshTasks();
     } catch (err) {
@@ -1081,10 +1140,10 @@ async function applyFanConfig() {
     const button = document.getElementById('fan-apply');
     button.disabled = true;
     try {
-        const opts = withAdmin({ method: 'POST', body: JSON.stringify(body) });
+        const opts = await withAdmin({ method: 'POST', body: JSON.stringify(body) });
         if (opts === null) return;
         await apiFetch(`/gpus/${fanModalGpuId}/fan`, opts);
-        adminPassword = '';
+        markAdminActivity();
         showToast(`GPU ${fanModalGpuId} fan set to ${fanModalMode}${fanModalMode === 'manual' ? ' (' + body.speed + '%)' : ''}`, 'success');
         closeFanModal();
         refreshGpus();
@@ -1106,6 +1165,7 @@ document.addEventListener('keydown', event => {
 loadUsers();
 loadGpus();
 startPolling();
+setInterval(updateAdminSessionDisplay, 1000);
 </script>
 </body>
 </html>

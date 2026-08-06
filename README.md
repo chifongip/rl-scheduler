@@ -233,11 +233,12 @@ curl -X POST http://localhost:8000/gpus/0/fan \
 
 ## Admin Password
 
-Set `ADMIN_PASSWORD` in the environment to protect admin-mode task operations and GPU fan control:
+`start.sh` defaults `ADMIN_PASSWORD` to `admin` and the inactivity timeout to five minutes. **Change the default password before running the service on a shared or network-accessible host.** Either edit `start.sh` or override its defaults in the environment:
 
 ```bash
 export ADMIN_PASSWORD="your-secret"
-sudo -E python3 main.py
+export ADMIN_SESSION_TIMEOUT_SECONDS=300  # optional; 1-86400
+./start.sh
 ```
 
 When set:
@@ -246,7 +247,9 @@ When set:
 - **Cross-user operations** (managing another user's tasks) — requires admin credentials
 - **GPU fan control** — always requires admin credentials
 
-The dashboard sends the credential in `X-Admin-Password`. Existing API clients may continue using the `admin_password` query parameter for compatibility, but headers avoid exposing credentials in URLs.
+The dashboard exchanges the password at `POST /admin/session` for a random, process-local token. It keeps that token only in browser memory and sends it as `X-Admin-Token`; each successful privileged operation renews the inactivity timeout. Use **Lock** to revoke it immediately. Refreshing the page, restarting the service, or remaining idle past the timeout requires the password again.
+
+Existing API clients may continue sending `X-Admin-Password` or the `admin_password` query parameter. New integrations should create a session and use `X-Admin-Token` so the password is not sent with every operation.
 
 If `ADMIN_PASSWORD` is not set, privileged admin and fan operations return 403 (disabled).
 

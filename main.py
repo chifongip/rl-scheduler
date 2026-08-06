@@ -9,11 +9,16 @@ from contextlib import asynccontextmanager
 from collections.abc import Callable
 
 import aiosqlite
-from fastapi import APIRouter, FastAPI, Header, HTTPException, Query, Request
+from fastapi import APIRouter, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from admin_sessions import (
+    AdminSessionStore,
+    DEFAULT_ADMIN_SESSION_TIMEOUT_SECONDS,
+    parse_admin_session_timeout,
+)
 from environments import get_user_home, is_within, list_conda_environments, resolve_python
 from hardware import GpuManager
 from models import (
@@ -42,6 +47,21 @@ logger = logging.getLogger("main")
 async def lifespan(app: FastAPI):
     logger.info("Starting rl-scheduler...")
     app.state.admin_password = os.environ.get("ADMIN_PASSWORD", "")
+    raw_timeout = os.environ.get("ADMIN_SESSION_TIMEOUT_SECONDS")
+    timeout = parse_admin_session_timeout(raw_timeout)
+    invalid_timeout = False
+    if raw_timeout is not None:
+        try:
+            invalid_timeout = int(raw_timeout) != timeout
+        except ValueError:
+            invalid_timeout = True
+    if invalid_timeout:
+        logger.warning(
+            "Invalid ADMIN_SESSION_TIMEOUT_SECONDS=%r; using %d seconds",
+            raw_timeout,
+            DEFAULT_ADMIN_SESSION_TIMEOUT_SECONDS,
+        )
+    app.state.admin_sessions = app.state.admin_session_store_factory(timeout)
     app.state.db = await init_db(app.state.db_path)
     app.state.gpu_manager = app.state.gpu_factory()
     app.state.scheduler = app.state.scheduler_factory(
@@ -75,6 +95,15 @@ class SubmitResponse(BaseModel):
 class AbortResponse(BaseModel):
     success: bool
     task_id: str
+
+
+class AdminSessionRequest(BaseModel):
+    password: str
+
+
+class AdminSessionResponse(BaseModel):
+    token: str
+    expires_in: int
 
 
 class TaskListResponse(BaseModel):
@@ -131,18 +160,54 @@ def _require_admin(
     username: str | None,
     admin_password: str | None,
     header_password: str | None = None,
-):
+    header_token: str | None = None,
+) -> str | None:
     if username:
-        return
+        return None
     configured_password = request.app.state.admin_password
     if not configured_password:
         raise HTTPException(status_code=403, detail="Admin mode is disabled (no ADMIN_PASSWORD set)")
+    if header_token is not None:
+        if request.app.state.admin_sessions.validate(header_token):
+            return header_token
+        raise HTTPException(status_code=403, detail="Invalid or expired admin session")
     supplied_password = header_password if header_password is not None else admin_password
     if supplied_password is None or not secrets.compare_digest(supplied_password, configured_password):
         raise HTTPException(status_code=403, detail="Invalid admin password")
+    return None
+
+
+def _touch_admin_session(request: Request, token: str | None) -> None:
+    if token is not None:
+        request.app.state.admin_sessions.touch(token)
 
 
 # --- Endpoints ---
+
+@router.post("/admin/session", response_model=AdminSessionResponse)
+async def create_admin_session(body: AdminSessionRequest, request: Request, response: Response):
+    configured_password = request.app.state.admin_password
+    if not configured_password:
+        raise HTTPException(status_code=403, detail="Admin mode is disabled (no ADMIN_PASSWORD set)")
+    if not secrets.compare_digest(body.password, configured_password):
+        raise HTTPException(status_code=403, detail="Invalid admin password")
+    token = request.app.state.admin_sessions.create()
+    response.headers["Cache-Control"] = "no-store"
+    return AdminSessionResponse(
+        token=token,
+        expires_in=request.app.state.admin_sessions.timeout_seconds,
+    )
+
+
+@router.delete("/admin/session")
+async def delete_admin_session(
+    request: Request,
+    x_admin_token: str | None = Header(default=None),
+):
+    if x_admin_token is None or not request.app.state.admin_sessions.validate(x_admin_token):
+        raise HTTPException(status_code=403, detail="Invalid or expired admin session")
+    request.app.state.admin_sessions.revoke(x_admin_token)
+    return {"success": True}
 
 @router.post("/tasks/submit", response_model=SubmitResponse)
 async def submit_task(body: TaskSubmit, request: Request):
@@ -230,6 +295,7 @@ async def abort_task(
     username: str | None = None,
     admin_password: str | None = None,
     x_admin_password: str | None = Header(default=None),
+    x_admin_token: str | None = Header(default=None),
 ):
     row = await get_task_by_id(request.app.state.db, task_id)
     if row is None:
@@ -238,11 +304,15 @@ async def abort_task(
         raise HTTPException(status_code=400, detail=f"Cannot abort task in state {row['state']}")
     if username and row["username"] != username:
         raise HTTPException(status_code=403, detail=f"Task belongs to user '{row['username']}', not '{username}'")
-    _require_admin(request, username, admin_password, x_admin_password)
+    session_token = _require_admin(
+        request, username, admin_password, x_admin_password, x_admin_token
+    )
     try:
         success = await request.app.state.scheduler.abort_task(task_id)
     except SupervisorUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+    if success:
+        _touch_admin_session(request, session_token)
     return AbortResponse(success=success, task_id=task_id)
 
 
@@ -252,9 +322,13 @@ async def delete_all_tasks_endpoint(
     username: str | None = None,
     admin_password: str | None = None,
     x_admin_password: str | None = Header(default=None),
+    x_admin_token: str | None = Header(default=None),
 ):
-    _require_admin(request, username, admin_password, x_admin_password)
+    session_token = _require_admin(
+        request, username, admin_password, x_admin_password, x_admin_token
+    )
     count = await delete_all_tasks(request.app.state.db, username)
+    _touch_admin_session(request, session_token)
     return {"deleted": count}
 
 
@@ -265,6 +339,7 @@ async def delete_task_endpoint(
     username: str | None = None,
     admin_password: str | None = None,
     x_admin_password: str | None = Header(default=None),
+    x_admin_token: str | None = Header(default=None),
 ):
     row = await get_task_by_id(request.app.state.db, task_id)
     if row is None:
@@ -273,10 +348,13 @@ async def delete_task_endpoint(
         raise HTTPException(status_code=400, detail=f"Cannot delete task in state {row['state']}")
     if username and row["username"] != username:
         raise HTTPException(status_code=403, detail=f"Task belongs to user '{row['username']}', not '{username}'")
-    _require_admin(request, username, admin_password, x_admin_password)
+    session_token = _require_admin(
+        request, username, admin_password, x_admin_password, x_admin_token
+    )
     deleted = await delete_task(request.app.state.db, task_id)
     if not deleted:
         raise HTTPException(status_code=500, detail="Failed to delete task")
+    _touch_admin_session(request, session_token)
     return {"success": True, "task_id": task_id}
 
 
@@ -293,8 +371,11 @@ async def set_gpu_fan(
     request: Request,
     admin_password: str | None = None,
     x_admin_password: str | None = Header(default=None),
+    x_admin_token: str | None = Header(default=None),
 ):
-    _require_admin(request, None, admin_password, x_admin_password)
+    session_token = _require_admin(
+        request, None, admin_password, x_admin_password, x_admin_token
+    )
     gpu_manager = request.app.state.gpu_manager
     if gpu_id not in gpu_manager.managed_gpu_ids:
         raise HTTPException(status_code=400, detail=f"Invalid GPU ID {gpu_id}")
@@ -309,6 +390,7 @@ async def set_gpu_fan(
             raise HTTPException(status_code=400, detail=f"Invalid mode: {body.mode}. Must be 'auto' or 'manual'.")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    _touch_admin_session(request, session_token)
     return result
 
 
@@ -453,11 +535,13 @@ def create_app(
     db_path: str = DB_PATH,
     gpu_factory: Callable[[], GpuManager] = GpuManager,
     scheduler_factory: Callable[[aiosqlite.Connection, GpuManager], Scheduler] = Scheduler,
+    admin_session_store_factory: Callable[[int], AdminSessionStore] = AdminSessionStore,
 ) -> FastAPI:
     application = FastAPI(title="rl-scheduler", lifespan=lifespan)
     application.state.db_path = db_path
     application.state.gpu_factory = gpu_factory
     application.state.scheduler_factory = scheduler_factory
+    application.state.admin_session_store_factory = admin_session_store_factory
     application.include_router(router)
     # Static files mount must follow API routes to avoid path conflicts.
     application.mount("/static", StaticFiles(directory="static"), name="static")

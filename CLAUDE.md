@@ -24,7 +24,8 @@ The pytest suite covers database transitions/migrations, scheduler helpers, and 
 ## Configuration
 
 Environment variables:
-- `ADMIN_PASSWORD` — password for admin-mode task operations and GPU fan control. The dashboard sends it in `X-Admin-Password`; the legacy query parameter remains accepted. If unset, admin operations are disabled.
+- `ADMIN_PASSWORD` — password for admin-mode task operations and GPU fan control. `start.sh` defaults it to `admin`; deployments must override that value. If the application receives no password, admin operations are disabled.
+- `ADMIN_SESSION_TIMEOUT_SECONDS` — sliding admin-session inactivity timeout, from 1 to 86400 seconds (default: 300). Invalid values fall back to the default.
 
 ## Architecture
 
@@ -37,11 +38,11 @@ A FastAPI control plane for systemd-managed GPU workloads. A background asyncio 
 - `scheduler.py` — Reconciles database rows with retained systemd status, restores GPU tracking after restart, pauses safely during supervisor outages, and leaves active units running on shutdown.
 - `systemd_runner.py` — Argument-safe `systemd-run`/`systemctl` adapter. Units retain exit status, append to task logs, and use control-group termination for abort.
 - `environments.py` — Central user-home, conda/venv discovery, containment, and Python resolution used by both validation and dispatch.
-- `main.py` — FastAPI app factory with lifespan-managed state and injectable GPU/scheduler factories. REST endpoints provide compatible task pagination/search and bounded byte-offset log reads. Blocking GPU operations are moved to worker threads; admin fan and cross-user operations accept `X-Admin-Password`.
+- `main.py` — FastAPI app factory with lifespan-managed state and injectable GPU/scheduler factories. REST endpoints provide compatible task pagination/search and bounded byte-offset log reads. Blocking GPU operations are moved to worker threads; privileged operations accept process-local admin-session tokens or legacy password credentials.
 
 **Frontend:** The zero-build vanilla JS/Tailwind dashboard uses one non-overlapping 3-second refresh cycle, bounded server-side task pages/search, user scope, and incremental live-log reads. Polling pauses in hidden tabs.
 
-**Admin password:** When `ADMIN_PASSWORD` is set, admin-mode abort/delete, cross-user actions, and all fan controls require it. The dashboard prompts when needed, sends the value in a header, and clears it after each successful mutation.
+**Admin sessions:** When `ADMIN_PASSWORD` is set, admin-mode abort/delete, cross-user actions, and all fan controls require authorization. The dashboard exchanges the password for a random token, retains it only in page memory, and renews its inactivity timeout after successful privileged operations. Lock, page refresh, service restart, or expiry requires authentication again. `X-Admin-Password` and the legacy query parameter remain accepted for API compatibility.
 
 **Task lifecycle:** `PENDING → STARTING → RUNNING → COMPLETED` (exit 0) or `FAILED`. Closing the app preserves units; explicit abort sends SIGKILL to the complete systemd control group. SQL guards and a lifecycle lock prevent dispatch/abort races.
 
