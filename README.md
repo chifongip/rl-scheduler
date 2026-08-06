@@ -193,7 +193,7 @@ PENDING ──claim──> STARTING ──unit active──> RUNNING ──exit 
 
 ## GPU Isolation
 
-Each task gets `CUDA_DEVICE_ORDER=PCI_BUS_ID` and `CUDA_VISIBLE_DEVICES=<gpu-uuid>` injected into its environment. UUIDs keep the physical GPU assignment stable even when NVML and CUDA ordinal ordering differ; the assigned GPU appears as device 0 to the training script.
+Each task gets `CUDA_DEVICE_ORDER=PCI_BUS_ID` and `CUDA_VISIBLE_DEVICES=<gpu-index>` injected into its environment. The assigned GPU appears as device 0 to the training script.
 
 A GPU is considered "available" when:
 1. No scheduler-managed task is currently running on it

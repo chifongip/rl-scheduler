@@ -22,15 +22,12 @@ class GpuManager:
                 raise ValueError(f"GPU {gid} not found (system has {device_count} GPUs)")
         # Build PCI Bus-Id map and sort by Bus-Id to match nvidia-smi order
         self.bus_id_map: dict[int, str] = {}
-        self.cuda_identifiers: dict[int, str] = {}
         nvml_bus_int: dict[int, int] = {}  # NVML index → bus number as int
         for gid in managed_gpu_ids:
             handle = pynvml.nvmlDeviceGetHandleByIndex(gid)
             pci = pynvml.nvmlDeviceGetPciInfo(handle)
             bus_id = pci.busId if isinstance(pci.busId, str) else pci.busId.decode()
             self.bus_id_map[gid] = bus_id
-            uuid = pynvml.nvmlDeviceGetUUID(handle)
-            self.cuda_identifiers[gid] = uuid.decode() if isinstance(uuid, bytes) else uuid
             # Extract bus number from "00000000:47:00.0" → 0x47
             bus_hex = bus_id.split(":")[1]
             nvml_bus_int[gid] = int(bus_hex, 16)
@@ -155,10 +152,6 @@ class GpuManager:
     def get_available_gpu_ids(self) -> list[int]:
         """Return one availability snapshot for a scheduler dispatch cycle."""
         return [gid for gid in self.managed_gpu_ids if self.is_gpu_available(gid)]
-
-    def get_cuda_identifier(self, gpu_id: int) -> str:
-        """Return a stable CUDA-visible identifier for the physical GPU."""
-        return self.cuda_identifiers[gpu_id]
 
     def register_task(self, task_id: str, gpu_id: int, process_group_id: int | None = None) -> None:
         with self._lock:

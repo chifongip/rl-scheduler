@@ -44,7 +44,7 @@ def _find_python(username: str | None, env_name: str | None, env_type: str | Non
     return resolve_python(username, env_name, env_type)
 
 
-def _wrap_command(command: str, conda_env: str | None, username: str | None = None, gpu_id: int | str | None = None, work_dir: str | None = None, env_type: str | None = None) -> str:
+def _wrap_command(command: str, conda_env: str | None, username: str | None = None, gpu_id: int | None = None, work_dir: str | None = None, env_type: str | None = None) -> str:
     if conda_env is not None and username is not None:
         python_path = _find_python(username, conda_env, env_type)
         if python_path is None:
@@ -230,8 +230,6 @@ class Scheduler:
             if not claimed:
                 return False
             open(log_path, "ab").close()
-            identifier_getter = getattr(self.gpu_manager, "get_cuda_identifier", None)
-            gpu_identifier = str(identifier_getter(gpu_id) if identifier_getter else gpu_id)
             try:
                 status = await self.runner.launch(
                     unit=unit,
@@ -239,7 +237,7 @@ class Scheduler:
                     username=username,
                     command=prepared,
                     work_dir=work_dir,
-                    gpu_identifier=gpu_identifier,
+                    gpu_id=gpu_id,
                     log_path=log_path,
                 )
             except SupervisorUnavailable:

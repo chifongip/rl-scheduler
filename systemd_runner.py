@@ -63,7 +63,7 @@ class SystemdRunner:
         username: str,
         command: str,
         work_dir: str,
-        gpu_identifier: str,
+        gpu_id: int,
         log_path: str,
     ) -> UnitStatus:
         args = (
@@ -76,7 +76,7 @@ class SystemdRunner:
             f"--uid={username}",
             f"--working-directory={work_dir}",
             "--setenv=CUDA_DEVICE_ORDER=PCI_BUS_ID",
-            f"--setenv=CUDA_VISIBLE_DEVICES={gpu_identifier}",
+            f"--setenv=CUDA_VISIBLE_DEVICES={gpu_id}",
             "--property=KillMode=control-group",
             "--property=TimeoutStopSec=5s",
             f"--property=StandardOutput=append:{os.path.abspath(log_path)}",

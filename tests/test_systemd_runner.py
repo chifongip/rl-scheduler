@@ -33,14 +33,14 @@ async def test_launch_uses_argument_boundaries_and_parses_status(tmp_path):
         username="alice",
         command=command,
         work_dir="/tmp",
-        gpu_identifier="GPU-123",
+        gpu_id=2,
         log_path=str(tmp_path / "task.log"),
     )
     launch_args = runner.commands[0]
     assert launch_args[0] == "systemd-run"
     assert launch_args[-1] == command
     assert launch_args[-3:-1] == ("-l", "-c")
-    assert "--setenv=CUDA_VISIBLE_DEVICES=GPU-123" in launch_args
+    assert "--setenv=CUDA_VISIBLE_DEVICES=2" in launch_args
     assert status.running
     assert status.main_pid == 123
 

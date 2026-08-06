@@ -622,7 +622,7 @@ function buildTaskRow(t) {
             <td class="px-4 py-2.5 font-mono text-xs text-gray-400">${escapeHtml(t.id)}</td>
             <td class="px-4 py-2.5 text-xs text-gray-300">${escapeHtml(t.username || '--')}</td>
             <td class="${tdClass} flex items-center gap-1" data-cmd-td><span class="${spanClass} flex-1 min-w-0" data-cmd-text>${escapeHtml(t.command)}</span> <button data-action="toggle-command" data-task-id="${t.id}" class="text-gray-500 hover:text-gray-300 text-xs flex-shrink-0" title="Expand/collapse">${chevron}</button></td>
-            <td class="px-4 py-2.5 text-xs">${t.gpu_id != null ? 'GPU ' + t.gpu_id : '--'}</td>
+            <td data-cell="gpu" class="px-4 py-2.5 text-xs">${t.gpu_id != null ? 'GPU ' + t.gpu_id : '--'}</td>
             <td class="px-4 py-2.5 text-center text-xs">${t.priority}</td>
             <td data-cell="state" class="px-4 py-2.5 text-center">${stateCell(t)}</td>
             <td data-cell="duration" class="px-4 py-2.5 text-right text-xs text-gray-400">${formatDuration(t.duration)}</td>
@@ -633,6 +633,7 @@ function buildTaskRow(t) {
 
 function updateTaskRow(row, t) {
     row.dataset.state = t.state;
+    row.querySelector('[data-cell="gpu"]').textContent = t.gpu_id != null ? 'GPU ' + t.gpu_id : '--';
     row.querySelector('[data-cell="state"]').innerHTML = stateCell(t);
     row.querySelector('[data-cell="duration"]').textContent = formatDuration(t.duration);
     row.querySelector('[data-cell="progress"]').innerHTML = progressCell(t);
