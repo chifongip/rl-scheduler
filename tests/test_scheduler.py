@@ -2,19 +2,37 @@ import asyncio
 
 import pytest
 
-from models import TaskSubmit, claim_task_starting, get_tasks, init_db, insert_task
+from models import (
+    TaskSubmit,
+    claim_task_starting,
+    get_disabled_gpu_bus_ids,
+    get_tasks,
+    init_db,
+    insert_task,
+)
 from scheduler import Scheduler, _parse_log_progress
 from systemd_runner import UnitStatus
 
 
 class FakeGpuManager:
     managed_gpu_ids = [0, 1]
+    bus_id_map = {0: "bus-0", 1: "bus-1"}
 
     def __init__(self):
         self.active_tasks = {}
+        self.disabled_gpu_ids = set()
 
     def get_available_gpu_ids(self):
-        return [0, 1]
+        return [gid for gid in self.managed_gpu_ids if self.is_scheduling_enabled(gid)]
+
+    def is_scheduling_enabled(self, gpu_id):
+        return gpu_id not in self.disabled_gpu_ids
+
+    def set_scheduling_enabled(self, gpu_id, enabled):
+        if enabled:
+            self.disabled_gpu_ids.discard(gpu_id)
+        else:
+            self.disabled_gpu_ids.add(gpu_id)
 
     def register_task(self, task_id, gpu_id, process_group_id=None):
         self.active_tasks[task_id] = gpu_id
@@ -30,6 +48,7 @@ class FakeRunner:
         self.statuses = {}
         self.stopped = []
         self.cleaned = []
+        self.launched = []
 
     @staticmethod
     def unit_name(task_id):
@@ -48,6 +67,11 @@ class FakeRunner:
 
     async def cleanup(self, unit):
         self.cleaned.append(unit)
+
+    async def launch(self, **values):
+        self.launched.append(values)
+        unit = values["unit"]
+        return UnitStatus(unit, "loaded", "active", "running", 123, 0, "success")
 
 
 def test_progress_parser_reads_latest_values(tmp_path):
@@ -69,6 +93,51 @@ async def test_submit_wakes_scheduler_and_preserves_priority_order(tmp_path, mon
     assert {row["command"] for row in rows} == {"echo low", "echo high"}
     cursor = await db.execute("SELECT command FROM tasks WHERE state='PENDING' ORDER BY priority DESC")
     assert [row[0] for row in await cursor.fetchall()] == ["echo high", "echo low"]
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_disabled_gpu_cannot_launch_pending_task(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = await init_db(str(tmp_path / "db.sqlite"))
+    task_id = await insert_task(db, TaskSubmit(username="alice", command="train"))
+    gpu = FakeGpuManager()
+    runner = FakeRunner()
+    scheduler = Scheduler(db, gpu, runner=runner)
+    gpu.register_task("existing", 0)
+    scheduler._wake_event.clear()
+    await scheduler.set_gpu_scheduling_enabled(0, False)
+
+    launched = await scheduler._spawn_task(
+        task_id, "train", str(tmp_path), 0, username="alice"
+    )
+
+    assert gpu.active_tasks["existing"] == 0
+    assert scheduler._wake_event.is_set()
+    assert await get_disabled_gpu_bus_ids(db) == {"bus-0"}
+    assert not launched
+    assert runner.launched == []
+    assert (await get_tasks(db))[0]["state"] == "PENDING"
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_auto_select_skips_disabled_gpu(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    db = await init_db(str(tmp_path / "db.sqlite"))
+    task_id = await insert_task(db, TaskSubmit(username="alice", command="train"))
+    gpu = FakeGpuManager()
+    gpu.set_scheduling_enabled(0, False)
+    runner = FakeRunner()
+    scheduler = Scheduler(db, gpu, runner=runner)
+
+    await scheduler._dispatch_pending_tasks()
+
+    assert runner.launched[0]["gpu_id"] == 1
+    row = (await get_tasks(db))[0]
+    assert row["id"] == task_id
+    assert row["gpu_id"] == 1
+    assert row["state"] == "RUNNING"
     await db.close()
 
 

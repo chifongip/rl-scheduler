@@ -19,6 +19,7 @@ from models import (
     get_pending_tasks,
     get_task_by_id,
     get_tasks,
+    set_gpu_scheduling_enabled as persist_gpu_scheduling_enabled,
     row_to_status,
     reset_starting_task,
     set_task_aborted,
@@ -226,6 +227,9 @@ class Scheduler:
             return False
 
         async with self._lifecycle_lock:
+            if not self.gpu_manager.is_scheduling_enabled(gpu_id):
+                logger.info("Task %s waiting: GPU %d scheduling is disabled", task_id, gpu_id)
+                return False
             claimed = await claim_task_starting(self.db, task_id, gpu_id, log_path, unit)
             if not claimed:
                 return False
@@ -348,6 +352,16 @@ class Scheduler:
             task_id, username, command, env_type, conda_env, preferred_gpu_id, priority,
         )
         return task_id
+
+    async def set_gpu_scheduling_enabled(self, gpu_id: int, enabled: bool) -> None:
+        async with self._lifecycle_lock:
+            bus_id = self.gpu_manager.bus_id_map[gpu_id]
+            await persist_gpu_scheduling_enabled(self.db, bus_id, enabled)
+            self.gpu_manager.set_scheduling_enabled(gpu_id, enabled)
+        self._wake_event.set()
+        logger.info(
+            "GPU %d scheduling %s", gpu_id, "enabled" if enabled else "disabled"
+        )
 
     async def abort_task(self, task_id: str) -> bool:
         async with self._lifecycle_lock:

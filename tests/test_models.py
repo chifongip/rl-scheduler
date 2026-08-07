@@ -6,12 +6,14 @@ from models import (
     TaskSubmit,
     claim_task_starting,
     count_tasks,
+    get_disabled_gpu_bus_ids,
     get_tasks,
     init_db,
     insert_task,
     set_task_aborted,
     set_task_finished,
     set_task_running,
+    set_gpu_scheduling_enabled,
 )
 
 
@@ -56,4 +58,15 @@ async def test_migration_preserves_running_tasks_for_reconciliation(tmp_path):
     row = (await get_tasks(db))[0]
     assert row["state"] == "RUNNING"
     assert row["runner_unit"] is None
+    await db.close()
+
+
+@pytest.mark.asyncio
+async def test_gpu_scheduling_setting_persists_by_bus_id(tmp_path):
+    db = await init_db(str(tmp_path / "scheduler.db"))
+    assert await get_disabled_gpu_bus_ids(db) == set()
+    await set_gpu_scheduling_enabled(db, "00000000:41:00.0", False)
+    assert await get_disabled_gpu_bus_ids(db) == {"00000000:41:00.0"}
+    await set_gpu_scheduling_enabled(db, "00000000:41:00.0", True)
+    assert await get_disabled_gpu_bus_ids(db) == set()
     await db.close()

@@ -107,6 +107,7 @@ curl http://localhost:8000/gpus
 | `DELETE` | `/tasks` | Delete completed/failed tasks (`username` or `X-Admin-Password`) |
 | `DELETE` | `/tasks/{task_id}` | Delete one completed/failed task (`username` or `X-Admin-Password`) |
 | `GET`  | `/gpus` | Live GPU telemetry (temp, VRAM, active task, external process count, fan status) |
+| `PUT` | `/gpus/{gpu_id}/scheduling` | Enable or disable new task assignments (administrator password required each time) |
 | `POST` | `/gpus/{gpu_id}/fan` | Set fan mode and speed (`{"mode": "auto"}` or `{"mode": "manual", "speed": 50}`) |
 | `GET`  | `/users` | List system users (uid ≥ 1000 with valid home dir) |
 | `GET`  | `/conda/envs/{username}` | List conda environments available to a user |
@@ -196,10 +197,13 @@ PENDING ──claim──> STARTING ──unit active──> RUNNING ──exit 
 Each task gets `CUDA_DEVICE_ORDER=PCI_BUS_ID` and `CUDA_VISIBLE_DEVICES=<gpu-index>` injected into its environment. The assigned GPU appears as device 0 to the training script.
 
 A GPU is considered "available" when:
-1. No scheduler-managed task is currently running on it
-2. No non-MPS compute processes are running on it (detected via NVML)
+1. Scheduling is enabled for that GPU
+2. No scheduler-managed task is currently running on it
+3. No non-MPS compute processes are running on it (detected via NVML)
 
-GPUs with external compute processes display as "Busy" (yellow) in the dashboard. GPUs managed by a scheduler task display as "Running" (blue).
+Select a GPU card and use **Disable** under Task scheduling in the GPU control panel to reserve that device for non-compute use. Every enable or disable action requires the administrator password, even when another admin session is active. The setting is stored by PCI bus ID and survives application restarts. Disabled GPUs remain visible for telemetry and fan control, but Auto-select skips them and explicit submissions to them are rejected. Disabling a GPU does not stop its current task; it prevents the next assignment.
+
+GPUs with external compute processes display as "Busy" (yellow), GPUs managed by a scheduler task display as "Running" (blue), and GPUs excluded from scheduling display as "Disabled" (red).
 
 ## Python Environment Support
 
@@ -211,7 +215,7 @@ Set `env_type` to `"conda"` or `"venv"` and provide the environment identifier i
 
 ## GPU Fan Control
 
-GPU fan speeds are displayed on each GPU card in the dashboard. Clicking a GPU card opens the fan control modal, which allows switching between automatic and manual fan control.
+GPU fan speeds are displayed on each GPU card in the dashboard. Clicking a GPU card opens its control panel, which contains scheduling controls and, when supported, automatic/manual fan controls.
 
 Fan control requires root privileges (the server runs with `sudo`) and is only supported on consumer GPUs (RTX series). Datacenter GPUs (A100, H100) typically use passive cooling and do not support NVML fan control. Fan support is detected automatically at runtime.
 

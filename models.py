@@ -33,6 +33,14 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 """
 
+CREATE_GPU_SETTINGS_SQL = """
+CREATE TABLE IF NOT EXISTS gpu_settings (
+    bus_id              TEXT PRIMARY KEY,
+    scheduling_enabled  INTEGER NOT NULL DEFAULT 1 CHECK (scheduling_enabled IN (0, 1)),
+    updated_at          REAL NOT NULL
+);
+"""
+
 INSERT_SQL = """
 INSERT INTO tasks (id, username, command, work_dir, conda_env, env_type, preferred_gpu_id, priority, state, created_at)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PENDING', ?);
@@ -132,6 +140,7 @@ class GpuStatus(BaseModel):
     memory_utilization_pct: float
     active_task_id: str | None
     external_process_count: int = 0
+    scheduling_enabled: bool = True
     fan_speed_pct: int | None = None
     fan_mode: str | None = None
     num_fans: int | None = None
@@ -148,6 +157,7 @@ async def init_db(db_path: str = DB_PATH) -> aiosqlite.Connection:
     db = await aiosqlite.connect(db_path)
     db.row_factory = aiosqlite.Row
     await db.execute(CREATE_TABLE_SQL)
+    await db.execute(CREATE_GPU_SETTINGS_SQL)
     cursor = await db.execute("PRAGMA table_info(tasks)")
     columns = {row[1] for row in await cursor.fetchall()}
     if "env_type" not in columns:
@@ -164,6 +174,27 @@ async def init_db(db_path: str = DB_PATH) -> aiosqlite.Connection:
     )
     await db.commit()
     return db
+
+
+async def get_disabled_gpu_bus_ids(db: aiosqlite.Connection) -> set[str]:
+    cursor = await db.execute(
+        "SELECT bus_id FROM gpu_settings WHERE scheduling_enabled = 0"
+    )
+    return {row[0] for row in await cursor.fetchall()}
+
+
+async def set_gpu_scheduling_enabled(
+    db: aiosqlite.Connection, bus_id: str, enabled: bool
+) -> None:
+    await db.execute(
+        """INSERT INTO gpu_settings (bus_id, scheduling_enabled, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(bus_id) DO UPDATE SET
+            scheduling_enabled = excluded.scheduling_enabled,
+            updated_at = excluded.updated_at""",
+        (bus_id, int(enabled), time.time()),
+    )
+    await db.commit()
 
 
 async def insert_task(db: aiosqlite.Connection, submit: TaskSubmit) -> str:

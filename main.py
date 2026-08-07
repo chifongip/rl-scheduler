@@ -24,11 +24,13 @@ from hardware import GpuManager
 from models import (
     DB_PATH,
     FanConfig,
+    GpuStatus,
     TaskSubmit,
     TaskStatus,
     count_tasks,
     delete_all_tasks,
     delete_task,
+    get_disabled_gpu_bus_ids,
     get_task_by_id,
     init_db,
     row_to_status,
@@ -64,6 +66,10 @@ async def lifespan(app: FastAPI):
     app.state.admin_sessions = app.state.admin_session_store_factory(timeout)
     app.state.db = await init_db(app.state.db_path)
     app.state.gpu_manager = app.state.gpu_factory()
+    disabled_bus_ids = await get_disabled_gpu_bus_ids(app.state.db)
+    for gpu_id, bus_id in app.state.gpu_manager.bus_id_map.items():
+        if bus_id in disabled_bus_ids:
+            app.state.gpu_manager.set_scheduling_enabled(gpu_id, False)
     app.state.scheduler = app.state.scheduler_factory(
         app.state.db, app.state.gpu_manager
     )
@@ -106,6 +112,15 @@ class AdminSessionResponse(BaseModel):
     expires_in: int
 
 
+class GpuSchedulingConfig(BaseModel):
+    enabled: bool
+
+
+class GpuSchedulingResponse(BaseModel):
+    gpu_id: int
+    scheduling_enabled: bool
+
+
 class TaskListResponse(BaseModel):
     tasks: list[TaskStatus]
     total: int
@@ -114,7 +129,7 @@ class TaskListResponse(BaseModel):
 
 
 class GpuListResponse(BaseModel):
-    gpus: list
+    gpus: list[GpuStatus]
 
 
 class CondaEnvListResponse(BaseModel):
@@ -229,6 +244,11 @@ async def submit_task(body: TaskSubmit, request: Request):
             raise HTTPException(
                 status_code=400,
                 detail=f"Invalid GPU ID {body.preferred_gpu_id}. Managed GPUs: {request.app.state.gpu_manager.managed_gpu_ids}",
+            )
+        if not request.app.state.gpu_manager.is_scheduling_enabled(body.preferred_gpu_id):
+            raise HTTPException(
+                status_code=400,
+                detail=f"GPU {body.preferred_gpu_id} is disabled for scheduling",
             )
 
     # Validate env_type
@@ -362,6 +382,23 @@ async def delete_task_endpoint(
 async def get_gpus(request: Request):
     statuses = await asyncio.to_thread(request.app.state.gpu_manager.get_all_gpu_status)
     return GpuListResponse(gpus=[s.model_dump() for s in statuses])
+
+
+@router.put("/gpus/{gpu_id}/scheduling", response_model=GpuSchedulingResponse)
+async def set_gpu_scheduling(
+    gpu_id: int,
+    body: GpuSchedulingConfig,
+    request: Request,
+    admin_password: str | None = None,
+    x_admin_password: str | None = Header(default=None),
+):
+    # Changing GPU scheduling always requires the password; session tokens are not accepted.
+    _require_admin(request, None, admin_password, x_admin_password)
+    gpu_manager = request.app.state.gpu_manager
+    if gpu_id not in gpu_manager.managed_gpu_ids:
+        raise HTTPException(status_code=400, detail=f"Invalid GPU ID {gpu_id}")
+    await request.app.state.scheduler.set_gpu_scheduling_enabled(gpu_id, body.enabled)
+    return GpuSchedulingResponse(gpu_id=gpu_id, scheduling_enabled=body.enabled)
 
 
 @router.post("/gpus/{gpu_id}/fan")

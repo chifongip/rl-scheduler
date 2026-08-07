@@ -6,14 +6,47 @@ from fastapi.testclient import TestClient
 
 from admin_sessions import AdminSessionStore
 from main import create_app
-from models import TaskSubmit, count_tasks, get_tasks, insert_task, row_to_status, set_task_aborted
+from models import (
+    GpuStatus,
+    TaskSubmit,
+    count_tasks,
+    get_tasks,
+    insert_task,
+    row_to_status,
+    set_gpu_scheduling_enabled,
+    set_task_aborted,
+)
 
 
 class FakeGpuManager:
     managed_gpu_ids = [0]
+    bus_id_map = {0: "00000000:41:00.0"}
+
+    def __init__(self):
+        self.disabled_gpu_ids = set()
 
     def get_all_gpu_status(self):
-        return []
+        return [
+            GpuStatus(
+                gpu_id=0,
+                name="Fake GPU",
+                temperature_c=40,
+                memory_used_mb=0,
+                memory_total_mb=100,
+                memory_utilization_pct=0,
+                active_task_id=None,
+                scheduling_enabled=self.is_scheduling_enabled(0),
+            )
+        ]
+
+    def is_scheduling_enabled(self, gpu_id):
+        return gpu_id in self.managed_gpu_ids and gpu_id not in self.disabled_gpu_ids
+
+    def set_scheduling_enabled(self, gpu_id, enabled):
+        if enabled:
+            self.disabled_gpu_ids.discard(gpu_id)
+        else:
+            self.disabled_gpu_ids.add(gpu_id)
 
     def set_fan_auto(self, gpu_id):
         return {"fan_supported": True, "fan_mode": "auto"}
@@ -28,6 +61,7 @@ class FakeGpuManager:
 class FakeScheduler:
     def __init__(self, db, gpu_manager):
         self.db = db
+        self.gpu_manager = gpu_manager
         self.supervisor_available = True
 
     async def start(self):
@@ -48,6 +82,12 @@ class FakeScheduler:
 
     async def abort_task(self, task_id):
         return await set_task_aborted(self.db, task_id)
+
+    async def set_gpu_scheduling_enabled(self, gpu_id, enabled):
+        await set_gpu_scheduling_enabled(
+            self.db, self.gpu_manager.bus_id_map[gpu_id], enabled
+        )
+        self.gpu_manager.set_scheduling_enabled(gpu_id, enabled)
 
     def get_progress(self, task_id):
         return None, None
@@ -177,3 +217,41 @@ def test_admin_session_is_disabled_without_password(tmp_path, monkeypatch):
     )
     with TestClient(app) as client:
         assert client.post("/admin/session", json={"password": "secret"}).status_code == 403
+
+
+def test_gpu_scheduling_toggle_requires_admin_and_persists(tmp_path, monkeypatch):
+    monkeypatch.setenv("ADMIN_PASSWORD", "secret")
+    app = create_app(
+        db_path=str(tmp_path / "db.sqlite"),
+        gpu_factory=FakeGpuManager,
+        scheduler_factory=FakeScheduler,
+    )
+    user = pwd.getpwuid(os.getuid())
+    task = {
+        "username": user.pw_name,
+        "command": "echo hello",
+        "work_dir": user.pw_dir,
+        "preferred_gpu_id": 0,
+    }
+
+    with TestClient(app) as client:
+        assert client.put("/gpus/0/scheduling", json={"enabled": False}).status_code == 403
+        token = client.post("/admin/session", json={"password": "secret"}).json()["token"]
+        assert client.put(
+            "/gpus/0/scheduling",
+            json={"enabled": False},
+            headers={"X-Admin-Token": token},
+        ).status_code == 403
+        response = client.put(
+            "/gpus/0/scheduling",
+            json={"enabled": False},
+            headers={"X-Admin-Password": "secret"},
+        )
+        assert response.json() == {"gpu_id": 0, "scheduling_enabled": False}
+        assert client.get("/gpus").json()["gpus"][0]["scheduling_enabled"] is False
+        rejected = client.post("/tasks/submit", json=task)
+        assert rejected.status_code == 400
+        assert rejected.json()["detail"] == "GPU 0 is disabled for scheduling"
+
+    with TestClient(app) as client:
+        assert client.get("/gpus").json()["gpus"][0]["scheduling_enabled"] is False

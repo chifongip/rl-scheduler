@@ -37,6 +37,7 @@ class GpuManager:
         # task_id -> gpu_id mapping for active jobs
         self.active_tasks: dict[str, int] = {}
         self.active_process_groups: dict[str, int] = {}
+        self.disabled_gpu_ids: set[int] = set()
         self._lock = threading.RLock()
         # fan capability cache: gpu_id -> {num_fans, min_speed, max_speed} or None
         self._fan_support: dict[int, dict | None] = {}
@@ -90,6 +91,7 @@ class GpuManager:
             memory_utilization_pct=mem_pct,
             active_task_id=active_task_id,
             external_process_count=external_count,
+            scheduling_enabled=self.is_scheduling_enabled(gpu_id),
             fan_speed_pct=fan_speed,
             fan_mode=fan_mode,
             num_fans=num_fans,
@@ -134,6 +136,9 @@ class GpuManager:
         if gpu_id not in self.managed_gpu_ids:
             return False
         with self._lock:
+            if gpu_id in self.disabled_gpu_ids:
+                logger.debug("GPU %d unavailable: scheduling is disabled", gpu_id)
+                return False
             if gpu_id in self.active_tasks.values():
                 logger.debug("GPU %d unavailable: has scheduler-managed task", gpu_id)
                 return False
@@ -152,6 +157,19 @@ class GpuManager:
     def get_available_gpu_ids(self) -> list[int]:
         """Return one availability snapshot for a scheduler dispatch cycle."""
         return [gid for gid in self.managed_gpu_ids if self.is_gpu_available(gid)]
+
+    def is_scheduling_enabled(self, gpu_id: int) -> bool:
+        with self._lock:
+            return gpu_id in self.managed_gpu_ids and gpu_id not in self.disabled_gpu_ids
+
+    def set_scheduling_enabled(self, gpu_id: int, enabled: bool) -> None:
+        if gpu_id not in self.managed_gpu_ids:
+            raise ValueError(f"GPU {gpu_id} is not managed")
+        with self._lock:
+            if enabled:
+                self.disabled_gpu_ids.discard(gpu_id)
+            else:
+                self.disabled_gpu_ids.add(gpu_id)
 
     def register_task(self, task_id: str, gpu_id: int, process_group_id: int | None = None) -> None:
         with self._lock:
