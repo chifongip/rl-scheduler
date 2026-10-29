@@ -108,6 +108,42 @@
         </div>
     </section>
 
+    <section class="bg-gray-900 border border-gray-800 rounded-lg">
+        <button id="tb-toggle" type="button" aria-expanded="false" aria-controls="tb-body" class="w-full px-5 py-3 flex items-center justify-between text-left" onclick="toggleTensorboard()">
+            <span class="text-sm font-semibold text-gray-400 uppercase tracking-wider">TensorBoard</span>
+            <svg id="tb-chevron" class="w-4 h-4 text-gray-500 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+        </button>
+        <div id="tb-body" class="hidden px-5 pb-5">
+            <p class="text-xs text-gray-400 mb-3">Select a log directory and Python environment. Sessions stop with the app.</p>
+            <form id="tb-form" class="grid grid-cols-1 md:grid-cols-6 gap-3 items-end">
+                <div class="md:col-span-3">
+                    <label for="tb-logdir" class="block text-xs text-gray-400 mb-1">Log directory</label>
+                    <div class="flex gap-1">
+                        <select id="tb-logdir" required class="flex-1 min-w-0 bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm font-mono focus:outline-none focus:border-blue-500"><option value="">Select log directory...</option></select>
+                        <button id="tb-browse" type="button" onclick="openBrowseModal('tb-logdir')" class="bg-gray-700 hover:bg-gray-600 text-gray-300 px-3 py-2 rounded text-sm transition">Browse...</button>
+                    </div>
+                    <input id="tb-logdir-custom" type="text" aria-label="Custom TensorBoard log directory" placeholder="/home/user/project/logs" pattern="/.*" title="Enter an absolute log directory path" class="hidden w-full bg-gray-800 border border-gray-700 rounded px-3 py-2 text-sm font-mono focus:outline-none focus:border-blue-500 mt-1">
+                </div>
+                <label class="text-xs text-gray-400">Python environment<select id="tb-env" class="block w-full bg-gray-800 border border-gray-700 rounded p-2 mt-1 text-sm"><option value="">System Python</option></select></label>
+                <label class="text-xs text-gray-400">Port (optional)<input id="tb-port" type="number" min="1024" max="65535" placeholder="Auto" class="block w-full bg-gray-800 border border-gray-700 rounded p-2 mt-1 text-sm"></label>
+                <button id="tb-start" class="bg-blue-600 rounded px-4 py-2 text-sm disabled:opacity-50">Start TensorBoard</button>
+            </form>
+            <div class="mt-4 flex items-center justify-between gap-3">
+                <span class="text-xs text-gray-400">Sessions &amp; history</span>
+                <button id="tb-delete-all" type="button" onclick="clearTensorboardHistory()" disabled title="Clear stopped and failed sessions; running sessions and log files are kept" class="px-3 py-1 text-xs rounded bg-red-600/80 hover:bg-red-500 disabled:opacity-50 disabled:cursor-not-allowed text-white transition">Delete All</button>
+            </div>
+            <div id="tb-sessions" class="mt-2 space-y-2 text-sm"></div>
+            <div id="tb-history-footer" class="mt-3 flex items-center justify-between gap-3 text-xs text-gray-400">
+                <span id="tb-history-count" aria-live="polite">0 history records</span>
+                <div id="tb-history-pagination" class="flex items-center gap-2" aria-label="TensorBoard history pages">
+                    <button id="tb-history-prev" type="button" disabled onclick="changeTensorboardPage(-1)" class="bg-gray-800 hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed rounded px-3 py-1.5">Previous</button>
+                    <span id="tb-history-page">1 / 1</span>
+                    <button id="tb-history-next" type="button" disabled onclick="changeTensorboardPage(1)" class="bg-gray-800 hover:bg-gray-700 disabled:opacity-40 disabled:cursor-not-allowed rounded px-3 py-1.5">Next</button>
+                </div>
+            </div>
+        </div>
+    </section>
+
     <!-- Task List -->
     <section>
         <div class="flex flex-wrap items-center justify-between gap-3 mb-3">
@@ -161,13 +197,13 @@
 <!-- Log Modal -->
 <div id="log-modal" class="fixed inset-0 z-40 hidden flex items-center justify-center modal-bg" role="dialog" aria-modal="true" aria-labelledby="log-title">
     <div class="bg-gray-900 rounded-lg border border-gray-700 w-full max-w-4xl h-[85vh] flex flex-col mx-4">
-        <div class="flex items-center justify-between px-5 py-3 border-b border-gray-800">
-            <div>
+        <div class="flex flex-wrap items-center justify-between gap-3 px-5 py-3 border-b border-gray-800">
+            <div class="min-w-0 flex-1 basis-full sm:basis-auto">
                 <h3 id="log-title" class="font-semibold text-sm">Task Log</h3>
-                <p id="log-meta" class="text-xs text-gray-500 mt-0.5"></p>
+                <p id="log-meta" class="text-xs text-gray-500 mt-0.5 [overflow-wrap:anywhere]"></p>
             </div>
-            <div class="flex items-center gap-2">
-                <label class="text-xs text-gray-400"><input id="log-autoscroll" type="checkbox" checked class="mr-1">Auto-scroll</label>
+            <div class="flex shrink-0 items-center gap-2 ml-auto">
+                <label class="text-xs text-gray-400 whitespace-nowrap"><input id="log-autoscroll" type="checkbox" checked class="mr-1">Auto-scroll</label>
                 <button id="log-copy" class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded text-xs">Copy</button>
                 <button id="log-refresh" class="bg-gray-700 hover:bg-gray-600 px-2 py-1 rounded text-xs">Refresh</button>
                 <button onclick="closeLogModal()" aria-label="Close log" class="text-gray-500 hover:text-gray-300 text-xl">&times;</button>
@@ -291,6 +327,17 @@ function toggleForm() {
     const chevron = document.getElementById('form-chevron');
     body.classList.toggle('hidden');
     chevron.style.transform = body.classList.contains('hidden') ? '' : 'rotate(180deg)';
+}
+
+function toggleTensorboard() {
+    const collapsed = document.getElementById('tb-body').classList.toggle('hidden');
+    document.getElementById('tb-chevron').style.transform = collapsed ? '' : 'rotate(180deg)';
+    document.getElementById('tb-toggle').setAttribute('aria-expanded', String(!collapsed));
+}
+
+function getDirectory(selectId) {
+    const value = document.getElementById(selectId).value;
+    return value === '__custom__' ? document.getElementById(selectId + '-custom').value : value;
 }
 
 // --- API helpers ---
@@ -472,16 +519,38 @@ document.getElementById('user-selector').addEventListener('change', function() {
 });
 
 function onUserChange(username) {
+    tbHistoryPage = 0;
+    tbSessions = [];
+    tbSessionsUser = username;
+    renderTensorboards();
+    closeBrowseModal();
+    currentCondaEnvs = [];
+    for (const id of Object.keys(venvsBySelect)) {
+        venvsBySelect[id] = [];
+        envScanVersion[id]++;
+        document.getElementById(id).value = '';
+    }
+    rebuildEnvDropdown();
+    if (logState?.kind === 'tensorboard') closeLogModal();
+    document.getElementById('tb-logdir').innerHTML = '<option value="">Select log directory...</option>';
+    for (const id of ['f-workdir', 'tb-logdir']) {
+        document.getElementById(id + '-custom').classList.add('hidden');
+        document.getElementById(id + '-custom').required = false;
+        document.getElementById(id + '-custom').value = '';
+    }
     if (username) {
         loadWorkdirs(username);
         loadCondaEnvs(username);
-        loadVenvs(userHomes[username] || '/home/' + username, username);
+        loadVenvs(userHomes[username] || '/home/' + username, username, null);
     } else {
         currentCondaEnvs = [];
-        currentVenvs = [];
-        document.getElementById('f-workdir').innerHTML = '<option value=".">.</option>';
+        for (const id of ['f-workdir', 'tb-logdir']) {
+            document.getElementById(id).innerHTML = id === 'tb-logdir'
+                ? '<option value="">Select log directory...</option>' : '<option value=".">.</option>';
+        }
         rebuildEnvDropdown();
     }
+    refreshTensorboards();
     if (taskScope === 'selected') { taskPage = 0; refreshTasks(); }
 }
 
@@ -491,31 +560,37 @@ async function loadWorkdirs(username) {
     try {
         const { directories } = await apiFetch('/workdirs/' + encodeURIComponent(username));
         if (username !== getSelectedUser()) return;
-        const sel = document.getElementById('f-workdir');
         const home = userHomes[username] || '/home/' + username;
         const opts = [`<option value="${escapeHtml(home)}">${escapeHtml(home)}</option>`] +
             directories.map(d => `<option value="${escapeHtml(d)}">${escapeHtml(d)}</option>`).join('') +
             '<option value="__custom__">Custom...</option>';
-        sel.innerHTML = opts;
+        for (const id of ['f-workdir', 'tb-logdir']) {
+            document.getElementById(id).innerHTML = (id === 'tb-logdir'
+                ? '<option value="">Select log directory...</option>' : '') + opts;
+        }
     } catch (e) {
         showToast('Failed to load workdirs: ' + e.message, 'error');
     }
 }
 
-document.getElementById('f-workdir').addEventListener('change', function() {
-    const custom = document.getElementById('f-workdir-custom');
-    if (this.value === '__custom__') {
-        custom.classList.remove('hidden');
-        custom.focus();
-    } else {
-        custom.classList.add('hidden');
-        const user = getSelectedUser();
-        if (user && this.value) {
-            const workdir = this.value === '.' ? (userHomes[user] || '/home/' + user) : this.value;
-            loadVenvs(workdir, user);
+for (const id of ['f-workdir', 'tb-logdir']) {
+    document.getElementById(id).addEventListener('change', function() {
+        const custom = document.getElementById(id + '-custom');
+        const isCustom = this.value === '__custom__';
+        custom.classList.toggle('hidden', !isCustom);
+        custom.required = isCustom;
+        if (isCustom) custom.focus();
+        else {
+            const user = getSelectedUser();
+            if (user && this.value) loadVenvs(this.value === '.' ? userHomes[user] : this.value, user,
+                id === 'tb-logdir' ? 'tb-env' : 'f-conda');
         }
-    }
-});
+    });
+    document.getElementById(id + '-custom').addEventListener('change', function() {
+        const user = getSelectedUser();
+        if (user && this.value) loadVenvs(this.value, user, id === 'tb-logdir' ? 'tb-env' : 'f-conda');
+    });
+}
 
 // --- GPU selector ---
 function updateGpuSelector(gpus) {
@@ -560,22 +635,30 @@ async function toggleGpuScheduling(gpuId, enabled) {
 
 // --- Python envs (conda + venv) ---
 let currentCondaEnvs = [];
-let currentVenvs = [];
+const venvsBySelect = { 'f-conda': [], 'tb-env': [] };
+const envScanVersion = { 'f-conda': 0, 'tb-env': 0 };
 
 function rebuildEnvDropdown() {
-    const sel = document.getElementById('f-conda');
-    let html = '<option value="">None</option>';
-    if (currentVenvs.length) {
-        html += '<optgroup label="venv">';
-        html += currentVenvs.map(v => `<option value="venv:${escapeHtml(v.path)}">${escapeHtml(v.name)}</option>`).join('');
-        html += '</optgroup>';
+    for (const [id, venvs] of Object.entries(venvsBySelect)) {
+        const select = document.getElementById(id);
+        const previous = select.value;
+        let html = `<option value="">${id === 'tb-env' ? 'System Python' : 'None'}</option>`;
+        if (venvs.length) {
+            html += '<optgroup label="venv">' + venvs.map(v =>
+                `<option value="venv:${escapeHtml(v.path)}">${escapeHtml(v.name)}</option>`).join('') + '</optgroup>';
+        }
+        if (currentCondaEnvs.length) {
+            html += '<optgroup label="conda">' + currentCondaEnvs.map(e =>
+                `<option value="${escapeHtml(e)}">${escapeHtml(e)}</option>`).join('') + '</optgroup>';
+        }
+        // Discovery in another directory must not discard an explicit environment choice.
+        const selected = select.selectedOptions[0]?.cloneNode(true);
+        select.innerHTML = html;
+        if (previous && !Array.from(select.options).some(o => o.value === previous) && selected) {
+            select.append(selected);
+        }
+        select.value = previous;
     }
-    if (currentCondaEnvs.length) {
-        html += '<optgroup label="conda">';
-        html += currentCondaEnvs.map(e => `<option value="${escapeHtml(e)}">${escapeHtml(e)}</option>`).join('');
-        html += '</optgroup>';
-    }
-    sel.innerHTML = html;
 }
 
 async function loadCondaEnvs(username) {
@@ -585,21 +668,27 @@ async function loadCondaEnvs(username) {
         if (username !== getSelectedUser()) return;
         currentCondaEnvs = environments;
     } catch (e) {
+        if (username !== getSelectedUser()) return;
         currentCondaEnvs = [];
         showToast('Failed to load conda envs: ' + e.message, 'error');
     }
     rebuildEnvDropdown();
 }
 
-async function loadVenvs(workdir, username) {
+async function loadVenvs(workdir, username, selectId = 'f-conda') {
     if (!workdir || !username) return;
+    const targets = selectId ? [selectId] : Object.keys(venvsBySelect);
+    const versions = Object.fromEntries(targets.map(id => [id, ++envScanVersion[id]]));
+    let venvs = [];
     try {
         const qs = '?path=' + encodeURIComponent(workdir) + '&username=' + encodeURIComponent(username);
-        const { venvs } = await apiFetch('/envs/scan-venvs' + qs);
-        if (username !== getSelectedUser()) return;
-        currentVenvs = venvs;
+        ({ venvs } = await apiFetch('/envs/scan-venvs' + qs));
     } catch {
-        currentVenvs = [];
+        // Preserve existing selections while allowing discovery to be retried.
+    }
+    if (username !== getSelectedUser()) return;
+    for (const id of targets) {
+        if (versions[id] === envScanVersion[id]) venvsBySelect[id] = venvs;
     }
     rebuildEnvDropdown();
 }
@@ -951,44 +1040,80 @@ async function deleteAllTasks() {
 async function viewLog(task_id) {
     const task = taskById.get(task_id);
     if (!task) return;
-    logState = { taskId: task_id, offset: 0, running: ['STARTING', 'RUNNING'].includes(task.state) };
-    modalReturnFocus = document.activeElement;
-    document.getElementById('log-meta').textContent = `${task_id} | ${task.command} | exit: ${task.exit_code ?? '--'} | ${formatDuration(task.duration)}`;
+    await openLogModal(
+        { kind: 'task', taskId: task_id, offset: 0, running: ['STARTING', 'RUNNING'].includes(task.state) },
+        'Task Log',
+        `${task_id} | ${task.command} | exit: ${task.exit_code ?? '--'} | ${formatDuration(task.duration)}`,
+    );
+}
+
+async function openLogModal(state, title, meta) {
+    clearInterval(logTimer);
+    logTimer = null;
+    if (!logState) modalReturnFocus = document.activeElement;
+    logState = state;
+    document.getElementById('log-title').textContent = title;
+    document.getElementById('log-meta').textContent = meta;
     document.getElementById('log-content').textContent = 'Loading...';
     document.getElementById('log-notice').classList.add('hidden');
     document.getElementById('log-modal').classList.remove('hidden');
     document.getElementById('log-refresh').focus();
     await loadLogTail();
-    clearInterval(logTimer);
-    if (logState && logState.running) logTimer = setInterval(refreshOpenLog, 2000);
+    if (logState === state && state.running) logTimer = setInterval(refreshOpenLog, 2000);
 }
 
 async function loadLogTail() {
-    if (!logState) return;
+    const state = logState;
+    if (!state || state.loading) return;
+    state.loading = true;
     try {
-        const res = await fetch(`${API}/tasks/${logState.taskId}/log?tail_bytes=131072`);
-        if (!res.ok) throw new Error('Log not found');
+        const isTensorboard = state.kind === 'tensorboard';
+        const path = isTensorboard ? state.path : `/tasks/${state.taskId}/log?tail_bytes=131072`;
+        const res = await fetch(API + path, state.opts);
+        if (!res.ok) throw new Error(isTensorboard ? await res.text() : 'Log not found');
+        const output = await res.text();
+        if (logState !== state) return;
         const content = document.getElementById('log-content');
-        content.textContent = await res.text();
-        logState.offset = parseInt(res.headers.get('X-Log-Next-Offset') || '0');
+        const scrollTop = content.scrollTop;
+        const nearBottom = content.scrollHeight - content.scrollTop - content.clientHeight < 48;
+        content.textContent = output || (isTensorboard ? 'No log output.' : '');
+        state.offset = parseInt(res.headers.get('X-Log-Next-Offset') || '0');
         const notice = document.getElementById('log-notice');
         const truncated = res.headers.get('X-Log-Truncated') === 'true';
-        notice.textContent = truncated ? 'Showing the latest 128 KiB of this log.' : '';
-        notice.classList.toggle('hidden', !truncated);
-        if (document.getElementById('log-autoscroll').checked) content.scrollTop = content.scrollHeight;
+        notice.textContent = isTensorboard ? 'Showing the latest 100 journal lines (up to 64 KiB).'
+            : truncated ? 'Showing the latest 128 KiB of this log.' : '';
+        notice.classList.toggle('hidden', !isTensorboard && !truncated);
+        if (document.getElementById('log-autoscroll').checked && (nearBottom || !state.loaded)) {
+            content.scrollTop = content.scrollHeight;
+        } else {
+            content.scrollTop = scrollTop;
+        }
+        state.loaded = true;
+        if (isTensorboard && !state.user) markAdminActivity();
     } catch (e) {
-        document.getElementById('log-content').textContent = 'Failed to load log: ' + e.message;
+        if (logState === state) document.getElementById('log-content').textContent = 'Failed to load log: ' + e.message;
+    } finally {
+        state.loading = false;
     }
 }
 
 async function refreshOpenLog() {
-    if (!logState) return;
+    const state = logState;
+    if (!state || state.loading) return;
+    if (state.kind === 'tensorboard') { await loadLogTail(); return; }
+    state.loading = true;
     try {
-        const res = await fetch(`${API}/tasks/${logState.taskId}/log?offset=${logState.offset}&limit_bytes=262144`);
+        const res = await fetch(`${API}/tasks/${state.taskId}/log?offset=${state.offset}&limit_bytes=262144`);
         if (!res.ok) throw new Error('Log not found');
         const totalSize = parseInt(res.headers.get('X-Log-Size') || '0');
-        if (totalSize < logState.offset) { await loadLogTail(); return; }
+        if (logState !== state) return;
+        if (totalSize < state.offset) {
+            state.loading = false;
+            await loadLogTail();
+            return;
+        }
         const chunk = await res.text();
+        if (logState !== state) return;
         const content = document.getElementById('log-content');
         const nearBottom = content.scrollHeight - content.scrollTop - content.clientHeight < 48;
         if (chunk) content.textContent += chunk;
@@ -998,19 +1123,23 @@ async function refreshOpenLog() {
             notice.textContent = 'Older log output was trimmed from this live view.';
             notice.classList.remove('hidden');
         }
-        logState.offset = parseInt(res.headers.get('X-Log-Next-Offset') || String(logState.offset));
+        state.offset = parseInt(res.headers.get('X-Log-Next-Offset') || String(state.offset));
         if (document.getElementById('log-autoscroll').checked && nearBottom) content.scrollTop = content.scrollHeight;
     } catch (e) {
         console.error('Log refresh failed:', e);
+    } finally {
+        state.loading = false;
     }
 }
 
 function closeLogModal() {
+    const fallback = logState?.kind === 'tensorboard' ? 'tb-toggle' : 'form-toggle';
     document.getElementById('log-modal').classList.add('hidden');
     clearInterval(logTimer);
     logTimer = null;
     logState = null;
-    if (modalReturnFocus) modalReturnFocus.focus();
+    if (modalReturnFocus?.isConnected) modalReturnFocus.focus();
+    else document.getElementById(fallback).focus();
     modalReturnFocus = null;
 }
 
@@ -1026,7 +1155,8 @@ document.getElementById('log-modal').addEventListener('click', event => {
 // --- Polling ---
 function startPolling() {
     refreshDashboard();
-    pollingInterval = setInterval(refreshDashboard, 3000);
+    refreshTensorboards();
+    pollingInterval = setInterval(() => { refreshDashboard(); refreshTensorboards(); }, 3000);
 }
 
 async function refreshDashboard() {
@@ -1048,8 +1178,11 @@ document.addEventListener('visibilitychange', () => {
 // --- Browse modal ---
 let browsePath = '';
 let browseSelected = '';
+let browseTarget = 'f-workdir';
+let browseRequestId = 0;
 
-function openBrowseModal() {
+function openBrowseModal(target = 'f-workdir') {
+    browseTarget = target;
     const user = getSelectedUser();
     if (!user) { showToast('Please select a user first', 'error'); return; }
     browsePath = '';
@@ -1060,10 +1193,12 @@ function openBrowseModal() {
 }
 
 function closeBrowseModal() {
+    browseRequestId++;
     document.getElementById('browse-modal').classList.add('hidden');
 }
 
 async function loadBrowseDir(path) {
+    const requestId = ++browseRequestId;
     const user = getSelectedUser();
     browsePath = path;
     browseSelected = (userHomes[user] || '/home/' + user) + (path ? '/' + path : '');
@@ -1075,6 +1210,7 @@ async function loadBrowseDir(path) {
     try {
         const qs = path ? '?path=' + encodeURIComponent(path) : '';
         const { directories } = await apiFetch('/workdirs/' + encodeURIComponent(user) + '/browse' + qs);
+        if (requestId !== browseRequestId || user !== getSelectedUser()) return;
         if (!directories.length) {
             list.innerHTML = '<div class="text-gray-500 text-sm text-center py-4">No subdirectories</div>';
             return;
@@ -1087,6 +1223,7 @@ async function loadBrowseDir(path) {
             </button>`;
         }).join('');
     } catch (e) {
+        if (requestId !== browseRequestId || user !== getSelectedUser()) return;
         list.innerHTML = '<div class="text-red-400 text-sm text-center py-4">' + escapeHtml(e.message) + '</div>';
     }
 }
@@ -1112,7 +1249,7 @@ document.getElementById('browse-modal').addEventListener('click', event => {
 
 function confirmBrowseSelection() {
     if (!browseSelected) { showToast('No directory selected', 'error'); return; }
-    const sel = document.getElementById('f-workdir');
+    const sel = document.getElementById(browseTarget);
     // Add selected path as an option if not present
     let found = false;
     for (const opt of sel.options) {
@@ -1126,10 +1263,11 @@ function confirmBrowseSelection() {
     }
     sel.value = browseSelected;
     sel.classList.remove('hidden');
-    document.getElementById('f-workdir-custom').classList.add('hidden');
+    document.getElementById(browseTarget + '-custom').classList.add('hidden');
+    document.getElementById(browseTarget + '-custom').required = false;
     closeBrowseModal();
     const user = getSelectedUser();
-    if (user) loadVenvs(browseSelected, user);
+    if (user) loadVenvs(browseSelected, user, browseTarget === 'tb-logdir' ? 'tb-env' : 'f-conda');
 }
 
 // --- Fan control modal ---
@@ -1227,6 +1365,199 @@ document.addEventListener('keydown', event => {
     if (!document.getElementById('log-modal').classList.contains('hidden')) closeLogModal();
     else if (!document.getElementById('browse-modal').classList.contains('hidden')) closeBrowseModal();
     else if (!document.getElementById('fan-modal').classList.contains('hidden')) closeFanModal();
+});
+
+// --- TensorBoard ---
+let tbRefreshInFlight = false;
+let tbSessions = [];
+let tbSessionsUser = null;
+let tbHistoryPage = 0;
+const tbHistoryPageSize = 10;
+const tbActiveStates = new Set(['STARTING', 'RUNNING']);
+const tbHistoryStates = new Set(['STOPPED', 'FAILED']);
+const tbActionStyles = {
+    stop: 'text-blue-400',
+    logs: 'bg-gray-700 hover:bg-gray-600 text-gray-300 px-2.5 py-1 rounded text-xs transition',
+    delete: 'bg-red-600/80 hover:bg-red-500 disabled:opacity-40 disabled:cursor-not-allowed text-white px-2.5 py-1 rounded text-xs transition',
+};
+
+async function refreshTensorboards() {
+    if (tbRefreshInFlight) return;
+    tbRefreshInFlight = true;
+    const user = getSelectedUser();
+    try {
+        const { sessions } = await apiFetch('/tensorboards' + (user ? '?username=' + encodeURIComponent(user) : ''));
+        if (user !== getSelectedUser()) return;
+        tbSessions = sessions;
+        tbSessionsUser = user;
+        if (logState?.kind === 'tensorboard') {
+            const session = sessions.find(s => s.id === logState.sessionId);
+            if (!session || !tbActiveStates.has(session.state)) {
+                logState.running = false;
+                clearInterval(logTimer);
+                logTimer = null;
+            }
+        }
+        renderTensorboards();
+    } catch (error) {
+        if (user !== getSelectedUser()) return;
+        document.getElementById('tb-sessions').textContent = 'TensorBoard: ' + error.message;
+        document.getElementById('tb-delete-all').disabled = true;
+        document.getElementById('tb-history-prev').disabled = true;
+        document.getElementById('tb-history-next').disabled = true;
+    } finally {
+        tbRefreshInFlight = false;
+        if (user !== getSelectedUser()) refreshTensorboards();
+    }
+}
+
+function changeTensorboardPage(delta) {
+    if (tbSessionsUser !== getSelectedUser()) return;
+    tbHistoryPage += delta;
+    renderTensorboards();
+}
+
+function renderTensorboards() {
+    // The API returns sessions in launch order. Reverse to show newest first.
+    const newest = tbSessions.slice().reverse();
+    const active = newest.filter(s => tbActiveStates.has(s.state));
+    const history = newest.filter(s => tbHistoryStates.has(s.state));
+    const pageCount = Math.max(1, Math.ceil(history.length / tbHistoryPageSize));
+    tbHistoryPage = Math.max(0, Math.min(tbHistoryPage, pageCount - 1));
+    const offset = tbHistoryPage * tbHistoryPageSize;
+    const container = document.getElementById('tb-sessions');
+    container.replaceChildren();
+    document.getElementById('tb-delete-all').disabled = history.length === 0;
+    for (const [title, sessions] of [
+        ['Active sessions', active],
+        ['History', history.slice(offset, offset + tbHistoryPageSize)],
+    ]) {
+        if (!sessions.length) continue;
+        const heading = document.createElement('div');
+        heading.className = 'pt-2 text-xs text-gray-400';
+        heading.textContent = title;
+        container.append(heading);
+        for (const session of sessions) container.append(createTensorboardRow(session));
+    }
+    if (!tbSessions.length) container.textContent = 'No TensorBoard sessions.';
+    document.getElementById('tb-history-count').textContent = history.length
+        ? `${offset + 1}–${Math.min(offset + tbHistoryPageSize, history.length)} of ${history.length} history records` : '0 history records';
+    document.getElementById('tb-history-page').textContent = `${tbHistoryPage + 1} / ${pageCount}`;
+    document.getElementById('tb-history-prev').disabled = tbHistoryPage === 0;
+    document.getElementById('tb-history-next').disabled = tbHistoryPage === pageCount - 1;
+}
+
+function createTensorboardRow(session) {
+    const row = document.createElement('div');
+    row.dataset.sessionId = session.id;
+    row.dataset.state = session.state;
+    row.className = 'grid grid-cols-1 sm:grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-2 bg-gray-800 rounded p-2';
+    const details = document.createElement('div');
+    details.className = 'flex min-w-0 flex-wrap items-center gap-3';
+    row.append(details);
+    const actions = document.createElement('div');
+    actions.className = 'flex shrink-0 items-center justify-self-end gap-1';
+    row.append(actions);
+    const label = document.createElement('span');
+    label.className = 'min-w-0 max-w-full [overflow-wrap:anywhere]';
+    label.textContent = `${session.username} · ${session.log_dir} · :${session.port} · ${session.state}${session.failure_reason ? ' · ' + session.failure_reason : ''}`;
+    details.append(label);
+    if (session.state === 'RUNNING') {
+        const link = document.createElement('a');
+        const url = new URL(window.location.href);
+        url.protocol = 'http:'; url.port = String(session.port); url.pathname = '/'; url.search = ''; url.hash = '';
+        link.href = url.href; link.target = '_blank'; link.rel = 'noopener noreferrer';
+        link.textContent = 'Open'; link.className = 'text-blue-400'; details.append(link);
+    }
+    for (const [action, title] of [['stop', 'Stop'], ['logs', 'Log'], ['delete', 'Delete']]) {
+        if (action === 'stop' && !(tbActiveStates.has(session.state) || session.state === 'FAILED')) continue;
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = title;
+        button.className = tbActionStyles[action];
+        button.onclick = () => tensorboardAction(session.id, action);
+        if (action === 'delete') {
+            button.disabled = !tbHistoryStates.has(session.state);
+            if (button.disabled) button.title = 'Stop this session before deleting its history';
+        }
+        (action === 'stop' ? details : actions).append(button);
+    }
+    return row;
+}
+
+async function clearTensorboardHistory() {
+    const user = getSelectedUser();
+    const scope = user ? ` for ${user}` : ' for all users';
+    if (!confirm(`Delete all stopped and failed TensorBoard history${scope}? Running sessions and log files will be kept.`)) return;
+    const button = document.getElementById('tb-delete-all');
+    button.disabled = true;
+    try {
+        let opts = { method: 'DELETE' };
+        if (!user) { opts = await withAdmin(opts); if (!opts) return; }
+        const result = await apiFetch('/tensorboards' + (user ? '?username=' + encodeURIComponent(user) : ''), opts);
+        if (user !== getSelectedUser()) return;
+        if (!user) markAdminActivity();
+        tbHistoryPage = 0;
+        if (logState?.kind === 'tensorboard') closeLogModal();
+        showToast(`Deleted ${result.deleted} TensorBoard history records`, 'success');
+    } catch (error) { showToast(error.message, 'error'); }
+    finally { await refreshTensorboards(); }
+}
+
+async function tensorboardAction(id, action) {
+    try {
+        const user = getSelectedUser();
+        if (action === 'delete' && !confirm('Delete this TensorBoard history record? Log files will be kept.')) return;
+        let opts = { method: action === 'delete' ? 'DELETE' : action === 'stop' ? 'POST' : 'GET' };
+        if (!user) { opts = await withAdmin(opts); if (!opts) return; }
+        if (user !== getSelectedUser()) return;
+        const path = `/tensorboards/${id}` + (action === 'delete' ? '' : '/' + action)
+            + (user ? '?username=' + encodeURIComponent(user) : '');
+        if (action === 'logs') {
+            const session = tbSessions.find(s => s.id === id);
+            await openLogModal(
+                { kind: 'tensorboard', sessionId: id, user, path, opts,
+                  running: tbActiveStates.has(session?.state) },
+                'TensorBoard Log',
+                `${id}${session ? ' | ' + session.log_dir : ''}`,
+            );
+            return;
+        } else {
+            await apiFetch(path, opts);
+            if (action === 'delete' && logState?.kind === 'tensorboard' && logState.sessionId === id) {
+                closeLogModal();
+            }
+        }
+        if (!user) markAdminActivity();
+        await refreshTensorboards();
+    } catch (error) { showToast(error.message, 'error'); }
+}
+
+document.getElementById('tb-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const username = getSelectedUser();
+    if (!username) { showToast('Select a user first', 'error'); return; }
+    const button = document.getElementById('tb-start');
+    button.disabled = true; button.textContent = 'Starting TensorBoard…';
+    try {
+        const env = document.getElementById('tb-env').value;
+        const port = document.getElementById('tb-port').value;
+        const logDir = getDirectory('tb-logdir').trim();
+        const session = await apiFetch('/tensorboards', { method: 'POST', body: JSON.stringify({
+            username, work_dir: logDir, log_dir: logDir,
+            env_type: env.startsWith('venv:') ? 'venv' : env ? 'conda' : 'system',
+            conda_env: env.startsWith('venv:') ? env.slice(5) : env || null,
+            port: port ? Number(port) : null,
+        }) });
+        if (username !== getSelectedUser()) return;
+        tbHistoryPage = 0;
+        if (session.state === 'FAILED') {
+            showToast(session.failure_reason, 'error');
+            await tensorboardAction(session.id, 'logs');
+        }
+        await refreshTensorboards();
+    } catch (error) { showToast(error.message, 'error'); }
+    finally { button.disabled = false; button.textContent = 'Start TensorBoard'; }
 });
 
 // --- Init ---

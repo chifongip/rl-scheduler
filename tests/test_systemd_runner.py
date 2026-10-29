@@ -65,3 +65,10 @@ async def test_stop_refuses_to_report_success_while_unit_is_running():
     ])
     with pytest.raises(RunnerError, match="still running"):
         await runner.stop("unit.service")
+
+
+@pytest.mark.asyncio
+async def test_inspect_does_not_treat_access_failure_as_missing_unit():
+    runner = RecordedRunner([(1, '', 'Access denied'), (0, '249', '')])
+    with pytest.raises(RunnerError, match='Access denied'):
+        await runner.inspect('protected.service')

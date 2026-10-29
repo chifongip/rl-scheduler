@@ -367,3 +367,56 @@ If `ADMIN_PASSWORD` is not set, privileged admin and fan operations return 403 (
 Each dispatched task runs as `rl-scheduler-task-<task_id>.service`, a transient systemd service with retained exit status. Closing or restarting the web app leaves these units running. On startup, the scheduler restores active GPU registrations, continues log/progress tracking, and records tasks that completed while it was offline. Abort explicitly kills the unit's complete control group.
 
 If systemd cannot be queried, `/health` reports `degraded`, existing task states are preserved, dispatch pauses, and new submissions return HTTP 503. Transient units survive app restarts but not a host reboot.
+
+## TensorBoard
+
+Expand **TensorBoard** after selecting a Linux user. Choose the **Log directory**
+with the dropdown, **Browse**, or **Custom** (an absolute path), then select the
+Python environment and click **Start TensorBoard**. The selected directory must
+exist within the user's home; it can be empty while waiting for training logs.
+TensorBoard must already be installed in the environment.
+
+Leave **Port** blank for automatic selection from 6006–6099, or specify a port
+from 1024–65535. For example, select `unitree_rl_mjlab`, browse to
+`~/unitree_rl_mjlab/logs/rsl_rl/x2_locomanipulation/`, and optionally use port
+`6008`. No separate project directory is needed. The dashboard supplies the
+selected absolute log directory as both the API's working directory and log path.
+
+**Open** launches TensorBoard in a new browser tab on the dashboard server's
+hostname and assigned HTTP port. The port must be reachable through the network
+and firewall. TensorBoard binds to `0.0.0.0`; direct access does not inherit the
+app's admin access controls. This feature follows the app's existing trusted
+user-selection model, which does not authenticate Linux users.
+
+Sessions run as the selected user through systemd, independently of the training
+queue, with GPUs hidden. Starting the same user's log directory with the same
+interpreter reuses an active session. **Log** opens the same popup viewer as
+Tasks, with Copy, Refresh, auto-scroll, and live updates for active sessions. It
+shows the last 100 journal lines (at most 64 KiB); use it for missing packages, permissions, or startup
+failures. **Stop** ends the service. Sessions stop on app shutdown; leftover
+TensorBoard units are cleaned up on the next startup after an abrupt exit.
+They are not restored after restart or reboot. Run one app instance per host.
+Slow startup does not block stopping other sessions. If the supervisor is
+unavailable during startup, a later launch retries availability and orphan
+cleanup automatically; transient outages do not require an app restart.
+There is no database migration or new app dependency.
+
+API: `POST /tensorboards` accepts `username`, `work_dir`, `log_dir`,
+`env_type` (`system`, `conda`, or `venv`), optional `conda_env` (environment name
+or venv path), and optional `port`. `GET /tensorboards` lists sessions and accepts
+an optional `username` filter. `POST /tensorboards/{id}/stop` and
+`GET /tensorboards/{id}/logs` require the owning `username` query parameter or an
+existing admin token/password header, following task ownership conventions.
+
+TensorBoard history has no fixed record limit and is held in memory until app
+restart. Active sessions stay at the top; stopped/failed records appear newest
+first, 10 per page. Previous/Next is always visible while expanded, with
+unavailable navigation disabled.
+
+**Delete** appears at the right of every row and removes an individual
+stopped/failed record. It is disabled while the session is active. **Delete All**
+clears history across all pages for the selected user. Without a selected user, clearing all users' history requires admin access. Running sessions
+and training log files are kept. If a failed service could not be stopped, stop
+it before clearing its history. The matching API is `DELETE /tensorboards`, with
+an optional owning `username` or admin headers. Single-record deletion uses
+`DELETE /tensorboards/{id}` with the same authorization rules.

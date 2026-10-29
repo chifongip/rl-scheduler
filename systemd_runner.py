@@ -2,7 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from tensorboards import TensorBoardSession
+
+TENSORBOARD_UNIT_PREFIX = "rl-scheduler-tensorboard-"
 
 
 class RunnerError(RuntimeError):
@@ -96,6 +103,47 @@ class SystemdRunner:
             raise RunnerError(stderr.strip() or f"systemd-run exited with {returncode}")
         return await self.inspect(unit)
 
+    async def launch_tensorboard(self, session: TensorBoardSession) -> UnitStatus:
+        # systemd-run resolves the executable literally; only arguments need $ escaping.
+        args = (
+            "systemd-run", "--quiet", f"--unit={session.unit}",
+            "--service-type=exec", "--remain-after-exit",
+            f"--uid={session.username}", f"--working-directory={session.work_dir}",
+            "--setenv=CUDA_VISIBLE_DEVICES=", "--property=KillMode=control-group",
+            "--property=TimeoutStopSec=5s", "--property=StandardOutput=journal",
+            "--property=StandardError=journal", "--",
+            session.python, "-m", "tensorboard.main",
+            "--logdir", session.log_dir.replace("$", "$$"),
+            "--host", "0.0.0.0", "--port", str(session.port),
+        )
+        try:
+            code, _, error = await self._run(*args)
+        except (OSError, asyncio.TimeoutError) as exc:
+            raise SupervisorUnavailable(str(exc)) from exc
+        if code:
+            raise RunnerError(error.strip() or "TensorBoard launch failed")
+        return await self.inspect(session.unit)
+
+    async def cleanup_tensorboards(self) -> None:
+        code, output, error = await self._run(
+            "systemctl", "list-units", "--all", "--plain", "--no-legend",
+            "--no-pager", f"{TENSORBOARD_UNIT_PREFIX}*.service",
+        )
+        if code:
+            raise RunnerError(error.strip() or "Cannot enumerate TensorBoard units")
+        for line in output.splitlines():
+            fields = line.split()
+            if fields and re.fullmatch(re.escape(TENSORBOARD_UNIT_PREFIX) + r"[0-9a-f]{32}\.service", fields[0]):
+                await self.cleanup(fields[0])
+
+    async def tensorboard_logs(self, unit: str) -> str:
+        code, output, error = await self._run(
+            "journalctl", "--unit", unit, "--no-pager", "--output=cat", "--lines=100",
+        )
+        if code:
+            raise RunnerError(error.strip() or "Cannot read TensorBoard diagnostics")
+        return output.encode("utf-8")[-65536:].decode("utf-8", errors="ignore")
+
     async def inspect(self, unit: str) -> UnitStatus:
         properties = "Id,LoadState,ActiveState,SubState,MainPID,ExecMainStatus,Result"
         try:
@@ -112,6 +160,7 @@ class SystemdRunner:
         if not values and stderr:
             if not await self.is_available():
                 raise SupervisorUnavailable(stderr.strip())
+            raise RunnerError(stderr.strip())
         return UnitStatus(
             unit=values.get("Id") or unit,
             load_state=values.get("LoadState", "not-found"),

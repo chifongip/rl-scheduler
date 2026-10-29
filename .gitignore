@@ -6,3 +6,5 @@ notes/
 scheduler.db
 .env
 .vscode/
+
+.cache/

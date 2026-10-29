@@ -10,7 +10,7 @@ from collections.abc import Callable
 
 import aiosqlite
 from fastapi import APIRouter, FastAPI, Header, HTTPException, Query, Request, Response
-from fastapi.responses import PlainTextResponse, RedirectResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -36,7 +36,8 @@ from models import (
     row_to_status,
 )
 from scheduler import Scheduler
-from systemd_runner import SupervisorUnavailable
+from systemd_runner import RunnerError, SupervisorUnavailable
+from tensorboards import TensorBoardManager, TensorBoardRequest, SessionError
 
 logging.basicConfig(
     level=logging.INFO,
@@ -74,13 +75,20 @@ async def lifespan(app: FastAPI):
         app.state.db, app.state.gpu_manager
     )
     await app.state.scheduler.start()
+    app.state.tensorboards = app.state.tensorboard_factory()
+    await app.state.tensorboards.start()
     logger.info("rl-scheduler ready")
-    yield
-    logger.info("Shutting down rl-scheduler...")
-    await app.state.scheduler.stop()
-    await asyncio.to_thread(app.state.gpu_manager.shutdown)
-    await app.state.db.close()
-    logger.info("rl-scheduler stopped")
+    try:
+        yield
+    finally:
+        logger.info("Shutting down rl-scheduler...")
+        try:
+            await app.state.tensorboards.close()
+        finally:
+            await app.state.scheduler.stop()
+            await asyncio.to_thread(app.state.gpu_manager.shutdown)
+            await app.state.db.close()
+        logger.info("rl-scheduler stopped")
 
 
 router = APIRouter()
@@ -568,13 +576,99 @@ async def get_task_log(
     return PlainTextResponse(raw.decode("utf-8", errors="replace"), headers=headers)
 
 
+async def tensorboard_error(request: Request, exc: SessionError) -> JSONResponse:
+    return JSONResponse(status_code=exc.status_code, content={"detail": str(exc)})
+
+
+@router.post("/tensorboards")
+async def launch_tensorboard(body: TensorBoardRequest, request: Request):
+    try:
+        return (await request.app.state.tensorboards.launch(body)).public()
+    except SupervisorUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/tensorboards")
+async def list_tensorboards(request: Request, username: str | None = None):
+    return {"sessions": [s.public() for s in request.app.state.tensorboards.sessions.values()
+                         if username is None or s.username == username]}
+
+
+@router.delete("/tensorboards")
+async def clear_tensorboard_history(
+    request: Request, username: str | None = Query(default=None, min_length=1),
+    x_admin_password: str | None = Header(default=None),
+    x_admin_token: str | None = Header(default=None),
+):
+    token = _require_admin(request, username, None, x_admin_password, x_admin_token)
+    deleted = await request.app.state.tensorboards.clear_history(username)
+    _touch_admin_session(request, token)
+    return {"deleted": deleted}
+
+
+def _authorize_tensorboard(
+    request: Request, session_id: str, username: str | None,
+    password: str | None, token: str | None,
+) -> str | None:
+    session = request.app.state.tensorboards.get(session_id)
+    if username and session.username != username:
+        raise HTTPException(status_code=403, detail="TensorBoard belongs to another user")
+    return _require_admin(request, username, None, password, token)
+
+
+@router.delete("/tensorboards/{session_id}")
+async def delete_tensorboard_history(
+    session_id: str, request: Request, username: str | None = None,
+    x_admin_password: str | None = Header(default=None),
+    x_admin_token: str | None = Header(default=None),
+):
+    token = _authorize_tensorboard(request, session_id, username, x_admin_password, x_admin_token)
+    deleted = await request.app.state.tensorboards.delete_history(session_id)
+    _touch_admin_session(request, token)
+    return {"deleted": deleted}
+
+
+@router.post("/tensorboards/{session_id}/stop")
+async def stop_tensorboard(
+    session_id: str, request: Request, username: str | None = None,
+    x_admin_password: str | None = Header(default=None),
+    x_admin_token: str | None = Header(default=None),
+):
+    token = _authorize_tensorboard(request, session_id, username, x_admin_password, x_admin_token)
+    try:
+        session = await request.app.state.tensorboards.stop(session_id)
+    except (RunnerError, OSError, asyncio.TimeoutError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    _touch_admin_session(request, token)
+    return session.public()
+
+
+@router.get("/tensorboards/{session_id}/logs", response_class=PlainTextResponse)
+async def tensorboard_logs(
+    session_id: str, request: Request, username: str | None = None,
+    x_admin_password: str | None = Header(default=None),
+    x_admin_token: str | None = Header(default=None),
+):
+    token = _authorize_tensorboard(request, session_id, username, x_admin_password, x_admin_token)
+    session = request.app.state.tensorboards.get(session_id)
+    try:
+        output = await request.app.state.tensorboards.runner.tensorboard_logs(session.unit)
+    except (RunnerError, OSError, asyncio.TimeoutError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    _touch_admin_session(request, token)
+    return PlainTextResponse(output, headers={"Cache-Control": "no-store"})
+
+
 def create_app(
     db_path: str = DB_PATH,
     gpu_factory: Callable[[], GpuManager] = GpuManager,
     scheduler_factory: Callable[[aiosqlite.Connection, GpuManager], Scheduler] = Scheduler,
     admin_session_store_factory: Callable[[int], AdminSessionStore] = AdminSessionStore,
+    tensorboard_factory: Callable[[], TensorBoardManager] = TensorBoardManager,
 ) -> FastAPI:
     application = FastAPI(title="rl-scheduler", lifespan=lifespan)
+    application.state.tensorboard_factory = tensorboard_factory
+    application.add_exception_handler(SessionError, tensorboard_error)
     application.state.db_path = db_path
     application.state.gpu_factory = gpu_factory
     application.state.scheduler_factory = scheduler_factory

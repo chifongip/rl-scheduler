@@ -1,6 +1,11 @@
 import os
 import pwd
 import sqlite3
+from unittest.mock import AsyncMock
+
+import pytest
+
+from tensorboards import TensorBoardManager
 
 from fastapi.testclient import TestClient
 
@@ -16,6 +21,13 @@ from models import (
     set_gpu_scheduling_enabled,
     set_task_aborted,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolate_tensorboard_supervisor(monkeypatch):
+    # API tests must never enumerate or stop host services.
+    monkeypatch.setattr(TensorBoardManager, 'start', AsyncMock())
+    monkeypatch.setattr(TensorBoardManager, 'close', AsyncMock())
 
 
 class FakeGpuManager:
@@ -255,3 +267,73 @@ def test_gpu_scheduling_toggle_requires_admin_and_persists(tmp_path, monkeypatch
 
     with TestClient(app) as client:
         assert client.get("/gpus").json()["gpus"][0]["scheduling_enabled"] is False
+
+
+def test_tensorboard_api_and_authorization(tmp_path, monkeypatch):
+    from tensorboards import TensorBoardSession
+    manager = TensorBoardManager(runner=AsyncMock())
+    session = TensorBoardSession('a' * 32, 'alice', str(tmp_path), str(tmp_path), 'system', None, '/usr/bin/python3', 6008, 'RUNNING')
+    manager.sessions[session.id] = session
+    manager.launch = AsyncMock(return_value=session)
+    monkeypatch.setenv('ADMIN_PASSWORD', 'secret')
+    app = create_app(db_path=str(tmp_path / 'db.sqlite'), gpu_factory=FakeGpuManager,
+                     scheduler_factory=FakeScheduler, tensorboard_factory=lambda: manager)
+    with TestClient(app) as client:
+        assert client.get('/tensorboards?username=bob').json() == {'sessions': []}
+        assert len(client.get('/tensorboards?username=alice').json()['sessions']) == 1
+        body = {'username': 'alice', 'work_dir': str(tmp_path), 'log_dir': '.'}
+        assert client.post('/tensorboards', json=body).json()['port'] == 6008
+        assert client.post('/tensorboards', json={**body, 'port': 80}).status_code == 422
+        url = f'/tensorboards/{session.id}'
+        assert client.post(url + '/stop?username=bob').status_code == 403
+        assert client.get(url + '/logs?username=bob').status_code == 403
+        assert client.post(url + '/stop').status_code == 403
+        manager.runner.tensorboard_logs.return_value = 'missing TensorBoard'
+        response = client.get(url + '/logs?username=alice')
+        assert response.text == 'missing TensorBoard'
+        assert response.headers['cache-control'] == 'no-store'
+        assert client.post(url + '/stop', headers={'X-Admin-Password': 'secret'}).json()['state'] == 'STOPPED'
+        assert client.get('/tensorboards/missing/logs?username=alice').status_code == 404
+
+
+def test_clear_tensorboard_history_authorization(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from tensorboards import TensorBoardSession
+    manager = TensorBoardManager(runner=AsyncMock())
+    session = TensorBoardSession('alice', 'alice', str(tmp_path), str(tmp_path), 'system', None, '/usr/bin/python3', 6008, 'STOPPED')
+    manager.sessions = {'alice': session, 'bob': replace(session, id='bob', username='bob'),
+                        'running': replace(session, id='running', state='RUNNING')}
+    monkeypatch.setenv('ADMIN_PASSWORD', 'secret')
+    app = create_app(db_path=str(tmp_path / 'db.sqlite'), gpu_factory=FakeGpuManager,
+                     scheduler_factory=FakeScheduler, tensorboard_factory=lambda: manager)
+    with TestClient(app) as client:
+        assert client.delete('/tensorboards').status_code == 403
+        assert client.delete('/tensorboards?username=').status_code == 422
+        assert client.delete('/tensorboards?username=alice').json() == {'deleted': 1}
+        assert set(manager.sessions) == {'bob', 'running'}
+        token = client.post('/admin/session', json={'password': 'secret'}).json()['token']
+        assert client.delete('/tensorboards', headers={'X-Admin-Token': token}).json() == {'deleted': 1}
+        assert set(manager.sessions) == {'running'}
+        assert client.delete('/tensorboards?username=alice').json() == {'deleted': 0}
+
+
+def test_delete_individual_tensorboard_history(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from tensorboards import TensorBoardSession
+    manager = TensorBoardManager(runner=AsyncMock())
+    session = TensorBoardSession('stopped', 'alice', str(tmp_path), str(tmp_path), 'system', None, '/usr/bin/python3', 6008, 'STOPPED')
+    manager.sessions = {'stopped': session, 'failed': replace(session, id='failed', state='FAILED'),
+                        'running': replace(session, id='running', state='RUNNING')}
+    monkeypatch.setenv('ADMIN_PASSWORD', 'secret')
+    app = create_app(db_path=str(tmp_path / 'db.sqlite'), gpu_factory=FakeGpuManager,
+                     scheduler_factory=FakeScheduler, tensorboard_factory=lambda: manager)
+    with TestClient(app) as client:
+        assert client.delete('/tensorboards/stopped?username=bob').status_code == 403
+        assert client.delete('/tensorboards/stopped').status_code == 403
+        assert client.delete('/tensorboards/running?username=alice').status_code == 409
+        assert client.delete('/tensorboards/stopped?username=alice').json() == {'deleted': 1}
+        assert client.delete('/tensorboards/stopped?username=alice').status_code == 404
+        token = client.post('/admin/session', json={'password': 'secret'}).json()['token']
+        assert client.delete('/tensorboards/failed', headers={'X-Admin-Token': token}).json() == {'deleted': 1}
+        assert set(manager.sessions) == {'running'}
+        manager.runner.cleanup.assert_not_awaited()
