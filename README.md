@@ -40,6 +40,7 @@ rl-scheduler/
 ├── requirements.txt  # Python dependencies
 ├── requirements-dev.txt # Test dependencies
 ├── start.sh          # Convenience launcher (sudo python3 main.py)
+├── install-service.sh # Install/enable boot startup using the selected Python
 ├── tests/             # pytest API, database, and scheduler tests
 ├── static/
 │   └── index.html    # Single-page dashboard (Tailwind CSS + vanilla JS)
@@ -80,6 +81,98 @@ sudo -E python3 main.py
 ```
 
 The server runs on `http://0.0.0.0:8000`. Opening this URL in a browser loads the dashboard.
+
+### Start automatically at boot (systemd)
+
+From the installed repository, run:
+
+```bash
+# With a writable conda environment:
+conda activate your-env
+python -I -m pip --isolated install --no-user -r requirements.txt
+./install-service.sh
+```
+
+The pip command excludes packages from `~/.local` and installs into the selected
+environment. It fails rather than falling back to a user installation if that
+environment is not writable. Use an environment you own. Without conda, create a
+dedicated venv instead of installing dependencies into the system Python:
+
+```bash
+python3 -m venv .venv
+.venv/bin/python -I -m pip --isolated install --no-user -r requirements.txt
+./install-service.sh --python "$PWD/.venv/bin/python"
+```
+
+Run the installer as your normal user; it selects `python3` from your current
+`PATH` before requesting sudo. You can also select an interpreter explicitly,
+including when invoking the installer with sudo:
+
+```bash
+./install-service.sh --python /home/your-user/miniconda3/envs/your-env/bin/python
+# venvs work too:
+./install-service.sh --python /home/your-user/project/.venv/bin/python
+```
+
+The installer writes `/etc/systemd/system/rl-scheduler.service`, enables startup
+at boot, and starts the app immediately (or restarts it on subsequent runs). Stop
+any copy launched manually with `start.sh` or `python main.py` first to free port
+8000. Use `--no-start` to install and enable without starting/restarting now, or
+`--dry-run` to preview the unit without sudo or system changes.
+
+On first installation, it generates a random admin password in
+`/etc/rl-scheduler.env`, owned by root with mode `600`. Existing settings are
+preserved on reinstall. View the generated password or edit the settings with:
+
+```bash
+sudo cat /etc/rl-scheduler.env
+sudoedit /etc/rl-scheduler.env
+sudo systemctl restart rl-scheduler
+```
+
+This file uses systemd environment-file syntax, for example:
+
+```ini
+ADMIN_PASSWORD="replace-with-your-own-secret"
+ADMIN_SESSION_TIMEOUT_SECONDS=300
+```
+
+The service runs as root for per-user jobs and GPU fan control. Keep the repository
+and Python environment writable only by trusted administrators. It uses the
+repository as its working directory, so the existing `scheduler.db`, `logs/`, and
+dashboard assets continue to be used. Keep both the repository and environment
+at their installed paths and available at boot; rerun the installer if either
+path changes. Login-unlocked encrypted home directories are unsuitable for boot
+startup; use an installation on a filesystem available before login.
+
+The selected environment's Python is invoked directly with its `bin` directory
+on `PATH`; boot does not require `conda activate` or a login shell. Conda activation
+hooks and variables exported in your terminal are not loaded. If your app needs
+additional variables, add them to `/etc/rl-scheduler.env`. The service restarts
+after failures, including temporary GPU initialization failures during boot.
+The installer checks dependencies in a temporary systemd service using the same
+environment settings, including saved `PYTHONPATH` and `LD_LIBRARY_PATH` values.
+For a first installation that needs these variables, create the settings file
+with `sudoedit /etc/rl-scheduler.env` before running the installer, including
+`ADMIN_PASSWORD` and `ADMIN_SESSION_TIMEOUT_SECONDS` as shown above. Settings files
+are parsed by systemd, so shell commands and variable substitutions are not run.
+See the [systemd service documentation](https://www.freedesktop.org/software/systemd/man/249/systemd.service.html)
+for restart and command execution behavior.
+
+```bash
+sudo systemctl status rl-scheduler
+sudo journalctl -u rl-scheduler -f
+curl http://localhost:8000/health
+
+# Stop the app and disable startup at boot:
+sudo systemctl disable --now rl-scheduler
+```
+
+To uninstall, disable it as above, remove
+`/etc/systemd/system/rl-scheduler.service`, then run `sudo systemctl daemon-reload`.
+Remove `/etc/rl-scheduler.env` separately if you no longer need its settings.
+Stopping the app leaves dispatched task services running; rebooting the device
+stops those transient jobs (see [App Restart Recovery](#app-restart-recovery)).
 
 ### Quick test via curl
 
