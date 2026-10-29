@@ -217,9 +217,21 @@ Set `env_type` to `"conda"` or `"venv"` and provide the environment identifier i
 
 GPU fan speeds are displayed on each GPU card in the dashboard. Clicking a GPU card opens its control panel, which contains scheduling controls and, when supported, automatic/manual fan controls.
 
-Fan control requires root privileges (the server runs with `sudo`) and is only supported on consumer GPUs (RTX series). Datacenter GPUs (A100, H100) typically use passive cooling and do not support NVML fan control. Fan support is detected automatically at runtime.
+Fan control requires root privileges (the server runs with `sudo`) and hardware that supports NVML fan control. Support is detected automatically at runtime; no GPU model configuration is required. GPUs without controllable fans remain available for scheduling and telemetry.
 
-On server shutdown, all fans are reset to automatic mode.
+Applying **Auto** enables scheduler temperature control for every fan on that GPU. The controller checks every five seconds, independently of dashboard requests:
+
+| GPU temperature | Fan speed |
+| --- | --- |
+| Below 50°C | 40% |
+| 50–64°C | 60% |
+| 65–74°C | 75% |
+| 75–79°C | 90% |
+| 80°C and above | 100% |
+
+The same default curve applies independently to every supported GPU, with speeds clamped to each GPU's supported range. Heating raises the speed on the next check. Cooling must reach five degrees below a band's threshold and stay there for 30 seconds before lowering the speed. Each downward step requires a separate cooling delay, even if the temperature drops across several bands. For example, after reaching 100% at 80°C, a reading of 79°C keeps the speed at 100%; it drops to 90% only after staying at or below 75°C for 30 seconds. Unchanged targets do not trigger hardware writes.
+
+Manual mode stops scheduler temperature control for that GPU. A temperature-read or fan-write failure triggers a return to driver control. If restoring driver control fails, the controller retries every five seconds until restoration succeeds or a new Auto/Manual setting is successfully applied. On server shutdown, all fans are reset to driver automatic mode. Scheduler Auto selections are not persisted: after a restart, apply Auto again to enable this curve; otherwise automatic control uses the driver's own curve.
 
 ```bash
 # Set fan to manual at 70%
@@ -228,7 +240,7 @@ curl -X POST http://localhost:8000/gpus/0/fan \
   -H "Content-Type: application/json" \
   -d '{"mode": "manual", "speed": 70}'
 
-# Reset fan to automatic
+# Enable scheduler temperature-based automatic control
 curl -X POST http://localhost:8000/gpus/0/fan \
   -H "X-Admin-Password: your-admin-password" \
   -H "Content-Type: application/json" \
